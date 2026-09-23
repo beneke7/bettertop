@@ -48,8 +48,10 @@ stage/
 
 # Compiled man page
 btop.1
+bettertop.1
 
 build
+dist/
 bin
 btop
 /obj/

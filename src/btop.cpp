@@ -44,6 +44,8 @@ tab-size = 4
 #include <chrono>
 #include <utility>
 #include <semaphore>
+#include <signal.h>
+#include <time.h>
 
 #ifdef __APPLE__
 	#include <CoreFoundation/CoreFoundation.h>
@@ -66,6 +68,7 @@ tab-size = 4
 #include "btop_input.hpp"
 #include "btop_log.hpp"
 #include "btop_menu.hpp"
+#include "btop_ml.hpp"
 #include "btop_shared.hpp"
 #include "btop_theme.hpp"
 #include "btop_tools.hpp"
@@ -85,6 +88,27 @@ using namespace Tools;
 using namespace std::chrono_literals;
 using namespace std::literals;
 
+#if defined(GPU_SUPPORT) && defined(__linux__)
+namespace Gpu::Bridge {
+	void start();
+	void shutdown() noexcept;
+}
+#endif
+
+namespace {
+	volatile sig_atomic_t pending_quit_signal{};
+	volatile sig_atomic_t pending_quit_status{};
+	volatile sig_atomic_t pending_sleep_signal{};
+	volatile sig_atomic_t pending_resize_signal{};
+	volatile sig_atomic_t pending_reload_signal{};
+#if defined(GPU_SUPPORT) && defined(__linux__)
+	bool gpu_bridge_started{};
+#endif
+
+	constexpr array fatal_signals{SIGSEGV, SIGABRT, SIGTRAP, SIGBUS, SIGILL, SIGFPE};
+	array<struct sigaction, fatal_signals.size()> previous_fatal_actions{};
+}
+
 namespace Global {
 	const vector<array<string, 2>> Banner_src = {
 		{"#E62525", "██████╗ ████████╗ ██████╗ ██████╗"},
@@ -94,7 +118,7 @@ namespace Global {
 		{"#801414", "██████╔╝   ██║   ╚██████╔╝██║        ╚═╝    ╚═╝"},
 		{"#000000", "╚═════╝    ╚═╝    ╚═════╝ ╚═╝"},
 	};
-	const string Version = "1.4.7";
+	const string Version = "0.1.0";
 
 	int coreCount;
 	string overlay;
@@ -126,6 +150,8 @@ namespace Global {
 
 namespace Runner {
 	static pthread_t runner_id;
+	void request_stop();
+	bool join_for(std::chrono::seconds timeout);
 } // namespace Runner
 
 //* Handler for SIGWINCH and general resizing events, does nothing if terminal hasn't been resized unless force=true
@@ -152,7 +178,7 @@ void term_resize(bool force) {
 	Config::unlock();
 
 	auto boxes = Config::getS("shown_boxes");
-	auto min_size = Term::get_min_size(boxes);
+	auto min_size = Config::getB("ml_view") ? array<int, 2>{0, 0} : Term::get_min_size(boxes);
 	auto minWidth = min_size.at(0), minHeight = min_size.at(1);
 
 	while (not force or (Term::width < minWidth or Term::height < minHeight)) {
@@ -211,23 +237,18 @@ void term_resize(bool force) {
 void clean_quit(int sig) {
 	if (Global::quitting) return;
 	Global::quitting = true;
-	Runner::stop();
+	Runner::request_stop();
+	if (not Term::restore()) _Exit(sig != -1 ? sig : 0);
 	if (Global::_runner_started) {
-	#if defined __APPLE__ || defined __OpenBSD__ || defined __NetBSD__
-		if (pthread_join(Runner::runner_id, nullptr) != 0) {
-			Logger::warning("Failed to join _runner thread on exit!");
-		}
-	#else
-		constexpr struct timespec ts { .tv_sec = 5, .tv_nsec = 0 };
-		if (pthread_timedjoin_np(Runner::runner_id, nullptr, &ts) != 0) {
-			Logger::warning("Failed to join _runner thread on exit!");
-		}
-	#endif
+		const auto joined = Runner::join_for(5s);
+		if (not joined) _Exit(sig != -1 ? sig : 0);
 	}
 
+#if defined(GPU_SUPPORT) && defined(__linux__)
+	if (gpu_bridge_started) Gpu::Bridge::shutdown();
+#endif
+
 #ifdef GPU_SUPPORT
-	Gpu::Nvml::shutdown();
-	Gpu::Rsmi::shutdown();
 	Gpu::Asysfs::shutdown();
 	#ifdef __APPLE__
 	Gpu::AppleSilicon::shutdown();
@@ -239,10 +260,7 @@ void clean_quit(int sig) {
 		Config::write();
 	}
 
-	if (Term::initialized) {
-		Input::clear();
-		Term::restore();
-	}
+	Input::clear();
 
 	if (not Global::exit_error_msg.empty()) {
 		sig = 1;
@@ -263,13 +281,12 @@ void clean_quit(int sig) {
 //* Handler for SIGTSTP; stops threads, restores terminal and sends SIGSTOP
 static void _sleep() {
 	Runner::stop();
-	Term::restore();
+	if (not Term::restore()) clean_quit(1);
 	std::raise(SIGSTOP);
-}
-
-//* Handler for SIGCONT; re-initialize terminal and force a resize event
-static void _resume() {
-	Term::init();
+	if (not Term::init()) {
+		Global::exit_error_msg = "Failed to restore terminal after resume.";
+		clean_quit(1);
+	}
 	term_resize(true);
 }
 
@@ -278,47 +295,79 @@ static void _exit_handler() {
 }
 
 static void _crash_handler(const int sig) {
-	// Restore terminal before crashing
-	if (Term::initialized) {
-		Term::restore();
+	Term::emergency_restore();
+	for (size_t i = 0; i < fatal_signals.size(); ++i) {
+		if (fatal_signals[i] == sig) {
+			::sigaction(sig, &previous_fatal_actions[i], nullptr);
+			break;
+		}
 	}
-	// Re-raise the signal to get default behavior (core dump)
-	std::signal(sig, SIG_DFL);
-	std::raise(sig);
+	::raise(sig);
 }
 
 static void _signal_handler(const int sig) {
 	switch (sig) {
 		case SIGINT:
-			Global::should_quit = true;
-			if (Runner::active) Runner::stopping = true;
-			Input::interrupt();
+		case SIGTERM:
+		case SIGHUP:
+		case SIGQUIT:
+			pending_quit_signal = sig;
 			break;
 		case SIGTSTP:
-			if (Runner::active) {
-				Global::should_sleep = true;
-				Runner::stopping = true;
-				Input::interrupt();
-			}
-			else {
-				_sleep();
-			}
+			pending_sleep_signal = 1;
 			break;
 		case SIGCONT:
-			_resume();
 			break;
 		case SIGWINCH:
-			Global::resized = true;
-			Input::interrupt();
+			pending_resize_signal = 1;
 			break;
 		case SIGUSR1:
 			// Input::poll interrupt
 			break;
 		case SIGUSR2:
-			Global::reload_conf = true;
-			Input::interrupt();
+			pending_reload_signal = 1;
 			break;
 	}
+	if (sig != SIGUSR1) ::kill(::getpid(), SIGUSR1);
+}
+
+static void _install_signal_handlers() {
+	std::atexit(_exit_handler);
+	auto install = [](const int sig, void (*handler)(int), const int flags = 0, struct sigaction* previous = nullptr) {
+		struct sigaction action{};
+		action.sa_handler = handler;
+		action.sa_flags = flags;
+		sigemptyset(&action.sa_mask);
+		::sigaction(sig, &action, previous);
+	};
+	for (const auto sig : {SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGTSTP, SIGCONT, SIGWINCH, SIGUSR1, SIGUSR2})
+		install(sig, _signal_handler);
+	for (size_t i = 0; i < fatal_signals.size(); ++i)
+		install(fatal_signals[i], _crash_handler, 0, &previous_fatal_actions[i]);
+}
+
+static void _dispatch_signal_flags() {
+	sigset_t handled, previous;
+	sigemptyset(&handled);
+	for (const auto sig : {SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGTSTP, SIGCONT, SIGWINCH, SIGUSR2})
+		sigaddset(&handled, sig);
+	pthread_sigmask(SIG_BLOCK, &handled, &previous);
+	const sig_atomic_t quit = pending_quit_signal;
+	const bool sleep = pending_sleep_signal;
+	const bool resize = pending_resize_signal;
+	const bool reload = pending_reload_signal;
+	pending_quit_signal = 0;
+	pending_sleep_signal = 0;
+	pending_resize_signal = 0;
+	pending_reload_signal = 0;
+	pthread_sigmask(SIG_SETMASK, &previous, nullptr);
+	if (quit) {
+		pending_quit_status = 128 + quit;
+		Global::should_quit = true;
+	}
+	if (sleep) Global::should_sleep = true;
+	if (resize) Global::resized = true;
+	if (reload) Global::reload_conf = true;
 }
 
 //* Config init
@@ -364,9 +413,10 @@ namespace Runner {
 
 	//* Setup semaphore for triggering thread to do work
 	// TODO: This can be made a local without too much effort.
-	std::binary_semaphore do_work { 0 };
+	std::counting_semaphore<2> do_work { 0 };
 	inline void thread_wait() { do_work.acquire(); }
 	inline void thread_trigger() { do_work.release(); }
+	std::binary_semaphore runner_exited { 0 };
 
 	//* Wrapper for raising privileges when using SUID bit
 	class gain_priv {
@@ -455,10 +505,15 @@ namespace Runner {
 	static void * _runner(void *) {
 		//? Block some signals in this thread to avoid deadlock from any signal handlers trying to stop this thread
 		sigemptyset(&mask);
-		// sigaddset(&mask, SIGINT);
-		// sigaddset(&mask, SIGTSTP);
-		sigaddset(&mask, SIGWINCH);
+		sigaddset(&mask, SIGINT);
 		sigaddset(&mask, SIGTERM);
+		sigaddset(&mask, SIGHUP);
+		sigaddset(&mask, SIGQUIT);
+		sigaddset(&mask, SIGTSTP);
+		sigaddset(&mask, SIGCONT);
+		sigaddset(&mask, SIGWINCH);
+		sigaddset(&mask, SIGUSR1);
+		sigaddset(&mask, SIGUSR2);
 		pthread_sigmask(SIG_BLOCK, &mask, nullptr);
 
 		// TODO: On first glance it looks redudant with `Runner::active`.
@@ -486,9 +541,10 @@ namespace Runner {
 			gain_priv powers{};
 
 			auto& conf = current_conf;
+			const bool ml_view = Config::getB("ml_view");
 
 			//! DEBUG stats
-			if (Global::debug) {
+			if (Global::debug and not ml_view) {
                 if (debug_bg.empty() or redraw)
                     Runner::debug_bg = Draw::createBox(2, 2, 33,
 					#ifdef GPU_SUPPORT
@@ -506,6 +562,27 @@ namespace Runner {
 
 			//* Run collection and draw functions for all boxes
 			try {
+				if (ml_view) {
+					auto& cpu = Cpu::collect(conf.no_update);
+					if (coreNum_reset) {
+						coreNum_reset = false;
+						Cpu::core_mapping = Cpu::get_core_mapping();
+						Global::resized = true;
+						Input::interrupt();
+						continue;
+					}
+					auto& mem = Mem::collect(conf.no_update);
+					auto& net = Net::collect(conf.no_update);
+					auto& processes = Proc::collect(conf.no_update);
+#if defined(GPU_SUPPORT)
+					auto& gpus = Gpu::collect(conf.no_update);
+					if (not pause_output)
+						output += Ml::draw(cpu, mem, net, processes, gpus, conf.force_redraw, conf.no_update);
+#else
+					if (not pause_output)
+						output += Ml::draw(cpu, mem, net, processes, conf.force_redraw, conf.no_update);
+#endif
+				} else {
 #if defined(GPU_SUPPORT)
 				//? GPU data collection
 				const bool gpu_in_cpu_panel = Gpu::gpu_names.size() > 0 and (
@@ -521,7 +598,12 @@ namespace Runner {
 						gpu_panels.push_back(box.back()-'0');
 
 				vector<Gpu::gpu_info> gpus;
-				if (gpu_in_cpu_panel or not gpu_panels.empty()) {
+#if defined(__linux__)
+				constexpr bool collect_gpu = true;
+#else
+				const bool collect_gpu = gpu_in_cpu_panel or not gpu_panels.empty();
+#endif
+				if (collect_gpu) {
 					if (Global::debug) debug_timer("gpu", collect_begin);
 					gpus = Gpu::collect(conf.no_update);
 					if (Global::debug) debug_timer("gpu", collect_done);
@@ -642,6 +724,7 @@ namespace Runner {
 						throw std::runtime_error("Proc:: -> " + string{e.what()});
 					}
 				}
+				}
 
 			}
 			catch (const std::exception& e) {
@@ -660,9 +743,9 @@ namespace Runner {
 				redraw = false;
 			}
 
-			if (not pause_output) output += conf.clock;
+			if (not ml_view and not pause_output) output += conf.clock;
 			if (not conf.overlay.empty() and not conf.background_update) pause_output = true;
-			if (output.empty() and not pause_output) {
+			if (not ml_view and output.empty() and not pause_output) {
 				if (empty_bg.empty()) {
 					const int x = Term::width / 2 - 10, y = Term::height / 2 - 10;
 					output += Term::clear;
@@ -692,7 +775,7 @@ namespace Runner {
 			}
 
 			//! DEBUG stats -->
-			if (Global::debug and not Menu::active) {
+			if (Global::debug and not ml_view and not Menu::active) {
 				output += fmt::format("{pre}{box:5.5} {collect:>12.12} {draw:>12.12}{post}",
 					"pre"_a = debug_bg + Theme::c("title") + Fx::b,
 					"box"_a = "box", "collect"_a = "collect", "draw"_a = "draw",
@@ -718,15 +801,33 @@ namespace Runner {
 
 			//? If overlay isn't empty, print output without color and then print overlay on top
 			const bool term_sync = Config::getB("terminal_sync");
-			cout << (term_sync ? Term::sync_start : "") << (conf.overlay.empty()
+			Term::output((term_sync ? Term::sync_start : "") + (conf.overlay.empty()
 					? output
 					: (output.empty() ? "" : Fx::ub + Theme::c("inactive_fg") + Fx::uncolor(output)) + conf.overlay)
-				<< (term_sync ? Term::sync_end : "") << flush;
+				+ (term_sync ? Term::sync_end : ""));
 		}
 		//* ----------------------------------------------- THREAD LOOP -----------------------------------------------
+		runner_exited.release();
 		return {};
 	}
 	//? ------------------------------------------ Secondary thread end -----------------------------------------------
+
+	void request_stop() {
+		stopping = true;
+		thread_trigger();
+	}
+
+	bool join_for(const std::chrono::seconds timeout) {
+#if defined(__linux__)
+		timespec deadline{};
+		if (::clock_gettime(CLOCK_REALTIME, &deadline) != 0) return false;
+		deadline.tv_sec += timeout.count();
+		return pthread_timedjoin_np(runner_id, nullptr, &deadline) == 0;
+#else
+		if (not runner_exited.try_acquire_for(timeout)) return false;
+		return pthread_join(runner_id, nullptr) == 0;
+#endif
+	}
 
 	//* Runs collect and draw in a secondary thread, unlocks and locks config to update cached values
 	void run(const string& box, bool no_update, bool force_redraw) {
@@ -866,7 +967,7 @@ static auto configure_tty_mode(std::optional<bool> force_tty) {
 			Config::conf_file = cli.config_file.value();
 		} else if (config_dir.has_value()) {
 			Config::conf_dir = config_dir.value();
-			Config::conf_file = Config::conf_dir / "btop.conf";
+			Config::conf_file = Config::conf_dir / "bettertop.conf";
 
 			auto log_file = Config::get_log_file();
 			if (log_file.has_value()) {
@@ -932,6 +1033,8 @@ static auto configure_tty_mode(std::optional<bool> force_tty) {
 
 	//? Config init
 	init_config(cli.low_color, cli.filter);
+	if (cli.classic) Config::set("ml_view", false);
+	if (cli.fun_mode.has_value()) Config::set("ml_fun", cli.fun_mode.value());
 
 	//? Try to find and set a UTF-8 locale
 	if (std::setlocale(LC_ALL, "") != nullptr and not std::string_view { std::setlocale(LC_ALL, "") }.contains(";")
@@ -1001,11 +1104,18 @@ static auto configure_tty_mode(std::optional<bool> force_tty) {
 		}
 	}
 
+	_install_signal_handlers();
+
 	//? Initialize terminal and set options
 	if (not Term::init()) {
 		Global::exit_error_msg = "No tty detected!\nbtop++ needs an interactive shell to run.";
 		clean_quit(1);
 	}
+
+#if defined(GPU_SUPPORT) && defined(__linux__)
+	gpu_bridge_started = true;
+	Gpu::Bridge::start();
+#endif
 
 	if (Term::current_tty != "unknown") {
 		Logger::info("Running on {}", Term::current_tty);
@@ -1044,21 +1154,6 @@ static auto configure_tty_mode(std::optional<bool> force_tty) {
 	Theme::updateThemes();
 	Theme::setTheme();
 
-	//? Setup signal handlers for CTRL-C, CTRL-Z, resume and terminal resize
-	std::atexit(_exit_handler);
-	std::signal(SIGINT, _signal_handler);
-	std::signal(SIGTSTP, _signal_handler);
-	std::signal(SIGCONT, _signal_handler);
-	std::signal(SIGWINCH, _signal_handler);
-	std::signal(SIGUSR1, _signal_handler);
-	std::signal(SIGUSR2, _signal_handler);
-	// Add crash handlers to restore terminal on crash
-	std::signal(SIGSEGV, _crash_handler);
-	std::signal(SIGABRT, _crash_handler);
-	std::signal(SIGTRAP, _crash_handler);
-	std::signal(SIGBUS, _crash_handler);
-	std::signal(SIGILL, _crash_handler);
-
 	sigset_t mask;
 	sigemptyset(&mask);
 	sigaddset(&mask, SIGUSR1);
@@ -1079,7 +1174,9 @@ static auto configure_tty_mode(std::optional<bool> force_tty) {
 		Config::apply_preset(Config::preset_list.at(Config::current_preset.value()));
 	}
 
-	{
+	if (Config::getB("ml_view")) {
+		Global::resized = true;
+	} else {
 		const auto [x, y] = Term::get_min_size(Config::getS("shown_boxes"));
 		if (Term::height < y or Term::width < x) {
 			pthread_sigmask(SIG_SETMASK, &Input::signal_mask, &mask);
@@ -1087,14 +1184,12 @@ static auto configure_tty_mode(std::optional<bool> force_tty) {
 			pthread_sigmask(SIG_SETMASK, &mask, nullptr);
 			Global::resized = false;
 		}
+		Draw::calcSizes();
 
+		//? Print out box outlines
+		const bool term_sync = Config::getB("terminal_sync");
+		cout << (term_sync ? Term::sync_start : "") << Cpu::box << Mem::box << Net::box << Proc::box << (term_sync ? Term::sync_end : "") << flush;
 	}
-
-	Draw::calcSizes();
-
-	//? Print out box outlines
-	const bool term_sync = Config::getB("terminal_sync");
-	cout << (term_sync ? Term::sync_start : "") << Cpu::box << Mem::box << Net::box << Proc::box << (term_sync ? Term::sync_end : "") << flush;
 
 
 	//? ------------------------------------------------ MAIN LOOP ----------------------------------------------------
@@ -1107,12 +1202,13 @@ static auto configure_tty_mode(std::optional<bool> force_tty) {
 
 	try {
 		while (not true not_eq not false) {
+			_dispatch_signal_flags();
 			//? Check for exceptions in secondary thread and exit with fail signal if true
 			if (Global::thread_exception) {
 				clean_quit(1);
 			}
 			else if (Global::should_quit) {
-				clean_quit(0);
+				clean_quit(pending_quit_status);
 			}
 			else if (Global::should_sleep) {
 				Global::should_sleep = false;
@@ -1124,6 +1220,8 @@ static auto configure_tty_mode(std::optional<bool> force_tty) {
 				if (Runner::active) Runner::stop();
 				Config::unlock();
 				init_config(cli.low_color, cli.filter);
+				if (cli.classic) Config::set("ml_view", false);
+				if (cli.fun_mode.has_value()) Config::set("ml_fun", cli.fun_mode.value());
 				Theme::updateThemes();
 				Theme::setTheme();
 				Draw::banner_gen(0, 0, false, true);
@@ -1135,8 +1233,10 @@ static auto configure_tty_mode(std::optional<bool> force_tty) {
 
 			//? Trigger secondary thread to redraw if terminal has been resized
 			if (Global::resized) {
-				Draw::calcSizes();
-				Draw::update_clock(true);
+				if (not Config::getB("ml_view")) {
+					Draw::calcSizes();
+					Draw::update_clock(true);
+				}
 				Global::resized = false;
 				if (Menu::active) Menu::process();
 				else Runner::run("all", true, true);
@@ -1144,7 +1244,7 @@ static auto configure_tty_mode(std::optional<bool> force_tty) {
 			}
 
 			//? Update clock if needed
-			if (Draw::update_clock() and not Menu::active) {
+			if (not Config::getB("ml_view") and Draw::update_clock() and not Menu::active) {
 				Runner::run("clock");
 			}
 

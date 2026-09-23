@@ -33,6 +33,10 @@ tab-size = 4
 #include "btop_shared.hpp"
 #include "btop_menu.hpp"
 #include "btop_draw.hpp"
+#include "btop_ml.hpp"
+#if defined(__linux__) && defined(GPU_SUPPORT)
+#include "linux/btop_gpu_bridge.hpp"
+#endif
 
 using namespace Tools;
 using namespace std::literals; // for operator""s
@@ -224,6 +228,62 @@ namespace Input {
 				if (key == "q") {
 					clean_quit(0);
 				}
+				else if (key == "v") {
+					if (Config::getB("ml_view")) {
+						const auto min_size = Term::get_min_size(Config::getS("shown_boxes"));
+						if (Term::width < min_size.at(0) || Term::height < min_size.at(1)) {
+							Menu::show(Menu::Menus::SizeError);
+							return;
+						}
+					}
+					Config::flip("ml_view");
+					Draw::calcSizes();
+					Draw::update_clock(true);
+					Runner::run("all", true, true);
+					return;
+				}
+				else if (Config::getB("ml_view") and key == "x") {
+					const auto& mode = Config::getS("ml_fun");
+					Config::set("ml_fun", string(mode == "off" ? "cat" : mode == "cat" ? "rocket" : "off"));
+					Runner::run("all", true, true);
+					return;
+				}
+#ifdef GPU_SUPPORT
+				else if (Config::getB("ml_view") and key == "g") {
+					Config::flip("ml_gpu_only");
+					Config::set("proc_start", 0);
+					Config::set("proc_selected", 0);
+					Runner::run("all", true, true);
+					return;
+				}
+				#if defined(__linux__) && defined(GPU_SUPPORT)
+				else if (Config::getB("ml_view") and key == "r") {
+					Gpu::Bridge::retry();
+					Runner::run("all", false, true);
+					return;
+				}
+				#endif
+#endif
+				else if (Config::getB("ml_view") and is_in(key, "left", "right")) {
+					static const array<string, 4> ml_sorts = {"vram", "gpu", "cpu", "ram"};
+					auto found = std::ranges::find(ml_sorts, Config::getS("ml_sorting"));
+					auto index = found == ml_sorts.end() ? 0 : static_cast<int>(std::distance(ml_sorts.begin(), found));
+					if (index >= static_cast<int>(ml_sorts.size())) index = 0;
+					index = (index + (key == "right" ? 1 : static_cast<int>(ml_sorts.size()) - 1)) % ml_sorts.size();
+					Config::set("ml_sorting", ml_sorts.at(index));
+					Runner::run("all", true, true);
+					return;
+				}
+				#ifdef GPU_SUPPORT
+				else if (Config::getB("ml_view") and is_in(key, "[", "]")) {
+					const int page = std::max(1, Ml::layout(Term::width.load(), Term::height.load(), Gpu::gpu_names.size()).gpu_rows);
+					const int max_start = std::max(0, static_cast<int>(Gpu::gpu_names.size()) - page);
+					const int start = std::clamp(Config::getI("ml_gpu_start") + (key == "]" ? page : -page), 0, max_start);
+					Config::set("ml_gpu_start", start);
+					Runner::run("all", true, true);
+					return;
+				}
+				#endif
 				else if (is_in(key, "escape", "m")) {
 					Menu::show(Menu::Menus::Main);
 					return;
@@ -393,16 +453,17 @@ namespace Input {
 				else if (key.starts_with("mouse_")) {
 					redraw = false;
 					const auto& [col, line] = mouse_pos;
-					const int y = (Config::getB("show_detailed") ? Proc::y + 8 : Proc::y);
-					const int height = (Config::getB("show_detailed") ? Proc::height - 8 : Proc::height);
+					const bool ml_view = Config::getB("ml_view");
+					const int y = (!ml_view and Config::getB("show_detailed") ? Proc::y + 8 : Proc::y);
+					const int height = (!ml_view and Config::getB("show_detailed") ? Proc::height - 8 : Proc::height);
 					const auto in_proc_box = col >= Proc::x + 1 and col < Proc::x + Proc::width and line >= y + 1 and line < y + height - 1;
 					if (key == "mouse_click") {
 						if (in_proc_box) {
-							if (col < Proc::x + Proc::width - 2) {
+							if (ml_view or col < Proc::x + Proc::width - 2) {
 								const auto& current_selection = Config::getI("proc_selected");
 								if (current_selection == line - y - 1) {
 									redraw = true;
-									if (Config::getB("proc_tree")) {
+									if (not ml_view and Config::getB("proc_tree")) {
 										const int x_pos = col - Proc::x;
 										const int offset = Config::getI("selected_depth") * 3;
 										if (x_pos > offset and x_pos < 4 + offset) {
@@ -427,13 +488,13 @@ namespace Input {
 
 								Config::set("proc_selected", line - y - 1);
 							}
-							else if (line == y + 1) {
+							else if (not ml_view and line == y + 1) {
 								if (Proc::selection("page_up") == -1) return;
 							}
-							else if (line == y + height - 2) {
+							else if (not ml_view and line == y + height - 2) {
 								if (Proc::selection("page_down") == -1) return;
 							}
-							else if (line == y + 2 + Proc::scroll_pos) {
+							else if (not ml_view and line == y + 2 + Proc::scroll_pos) {
 								dragging_scroll = true;
 							}
 							else if (Proc::selection("mousey" + to_string(line - y - 2)) == -1)

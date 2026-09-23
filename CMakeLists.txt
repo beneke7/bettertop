@@ -10,9 +10,10 @@ if("${CMAKE_CURRENT_SOURCE_DIR}" STREQUAL "${CMAKE_CURRENT_BINARY_DIR}")
   message(FATAL_ERROR "In-source builds are not allowed")
 endif()
 
-project("btop"
-  DESCRIPTION "A monitor of resources"
-  HOMEPAGE_URL "https://github.com/aristocratos/btop"
+project("BetterTop"
+  VERSION 0.1.0
+  DESCRIPTION "A host and GPU monitor for machine learning workstations"
+  HOMEPAGE_URL "https://github.com/beneke7/bettertop"
   LANGUAGES CXX
 )
 
@@ -52,6 +53,7 @@ add_library(libbtop OBJECT
   src/btop_draw.cpp
   src/btop_input.cpp
   src/btop_log.cpp
+  src/btop_ml.cpp
   src/btop_menu.cpp
   src/btop_shared.cpp
   src/btop_theme.cpp
@@ -59,6 +61,10 @@ add_library(libbtop OBJECT
 )
 
 target_link_libraries(btop libbtop)
+set_target_properties(btop PROPERTIES OUTPUT_NAME bettertop)
+if(LINUX AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  target_link_options(btop PRIVATE -static-libstdc++ -static-libgcc)
+endif()
 
 if(BTOP_LTO)
   check_ipo_supported()
@@ -75,8 +81,26 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "OpenBSD")
 elseif(CMAKE_SYSTEM_NAME STREQUAL "NetBSD")
   target_sources(libbtop PRIVATE src/netbsd/btop_collect.cpp)
 elseif(LINUX)
+  enable_language(C)
   target_sources(libbtop PRIVATE src/linux/btop_collect.cpp)
   if(BTOP_GPU)
+    target_sources(libbtop PRIVATE src/linux/btop_gpu_bridge.cpp)
+    set(BETTERTOP_NVTOP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/bettertop_gpu/vendor/nvtop")
+    add_executable(bettertop-gpu
+      src/bettertop_gpu.c
+      src/bettertop_gpu/vendor/nvtop/src/extract_gpuinfo.c
+      src/bettertop_gpu/vendor/nvtop/src/extract_gpuinfo_nvidia.c
+      src/bettertop_gpu/vendor/nvtop/src/time.c
+    )
+    set_property(TARGET bettertop-gpu PROPERTY C_STANDARD 11)
+    target_include_directories(bettertop-gpu PRIVATE
+      src
+      "${BETTERTOP_NVTOP_DIR}/include"
+    )
+    target_compile_options(bettertop-gpu PRIVATE -Wall -Wextra -Wpedantic -ffunction-sections -fdata-sections)
+    target_link_options(bettertop-gpu PRIVATE -Wl,--gc-sections)
+    target_link_libraries(bettertop-gpu PRIVATE m ${CMAKE_DL_LIBS})
+    install(TARGETS bettertop-gpu RUNTIME DESTINATION bin)
     add_subdirectory(src/linux/intel_gpu_top)
   endif()
 else()
@@ -255,25 +279,28 @@ find_program(LOWDOWN_EXECUTABLE lowdown)
 if(LOWDOWN_EXECUTABLE)
   # Custom target to compile Markdown to man page using lowdown
   add_custom_command(
-    OUTPUT btop.1
-    COMMAND lowdown -s -T man -o btop.1 ${CMAKE_CURRENT_SOURCE_DIR}/manpage.md
+    OUTPUT bettertop.1
+    COMMAND lowdown -s -T man -o bettertop.1 ${CMAKE_CURRENT_SOURCE_DIR}/manpage.md
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/manpage.md
     VERBATIM
   )
-  add_custom_target(generate_manpage ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/btop.1)
+  add_custom_target(generate_manpage ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/bettertop.1)
   # Install the man page
-  install(FILES "${CMAKE_CURRENT_BINARY_DIR}/btop.1" DESTINATION "share/man/man1")
+  install(FILES "${CMAKE_CURRENT_BINARY_DIR}/bettertop.1" DESTINATION "share/man/man1")
 else()
-  message(STATUS "Command 'lowdown' not found: skipping generating man page btop.1")
+  message(STATUS "Command 'lowdown' not found: skipping generating man page bettertop.1")
 endif()
 
 install(TARGETS btop RUNTIME)
-install(FILES "btop.desktop" DESTINATION "share/applications")
-install(FILES "Img/icon.png" DESTINATION "share/icons/hicolor/48x48/apps" RENAME "btop.png")
-install(FILES "Img/icon.svg" DESTINATION "share/icons/hicolor/scalable/apps" RENAME "btop.svg")
+install(FILES "btop.desktop" DESTINATION "share/applications" RENAME "bettertop.desktop")
+install(FILES "Img/icon.png" DESTINATION "share/icons/hicolor/48x48/apps" RENAME "bettertop.png")
+install(FILES "Img/icon.svg" DESTINATION "share/icons/hicolor/scalable/apps" RENAME "bettertop.svg")
 install(DIRECTORY "themes" DESTINATION "share/btop")
 
 include(CTest)
 if(BUILD_TESTING)
   add_subdirectory(tests)
+  if(LINUX AND BTOP_GPU)
+    add_test(NAME bettertop-gpu-protocol COMMAND bettertop-gpu --self-check)
+  endif()
 endif()

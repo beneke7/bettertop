@@ -1,0 +1,1468 @@
+/*
+ *
+ * Copyright (C) 2021-2024 Maxime Schmitt <maxime.schmitt91@gmail.com>
+ *
+ * This file is part of Nvtop.
+ *
+ * Nvtop is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Nvtop is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with nvtop.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+
+#include "nvtop/common.h"
+#include "nvtop/extract_gpuinfo_common.h"
+#include "nvtop/time.h"
+#include "bettertop_gpu_protocol.h"
+
+#include <dlfcn.h>
+#include <errno.h>
+#include <limits.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define BETTERTOP_MAX_GPU_PROCESS_ROWS BETTERTOP_GPU_MAX_PROCESSES
+
+// We do NOT include nvml.h — nvtop uses dlsym function pointers for all NVML
+// functions, and including nvml.h would conflict with those declarations.
+// Instead, we manually declare nvmlFieldValue_t and its dependencies here.
+// This satisfies the maintainer's requirement to use the proper struct type
+// instead of raw memcpy offsets, without breaking the dlsym architecture.
+
+// Core NVML types needed throughout the file (from nvml.h — cannot include directly
+// due to dlsym function pointer conflicts with nvtop's architecture).
+
+// NVML return codes (subset — we only use NVML_SUCCESS and NVML_ERROR_NOT_SUPPORTED)
+typedef enum nvmlReturn_enum {
+  NVML_SUCCESS = 0,
+  NVML_ERROR_UNINITIALIZED = 1,
+  NVML_ERROR_INVALID_ARGUMENT = 2,
+  NVML_ERROR_NOT_SUPPORTED = 3,
+  NVML_ERROR_NO_PERMISSION = 4,
+  NVML_ERROR_INSUFFICIENT_SIZE = 7,
+} nvmlReturn_t;
+
+// Opaque device handle (nvml.h defines as struct nvmlDevice_st*)
+typedef struct nvmlDevice_st *nvmlDevice_t;
+
+// nvmlFieldValue_t and its dependencies (manually declared to avoid including nvml.h).
+// These match nvml.h struct/enum definitions from CUDA 12.x.
+typedef enum nvmlValueType_enum {
+  NVML_VALUE_TYPE_DOUBLE = 0,
+  NVML_VALUE_TYPE_UNSIGNED_INT = 1,
+  NVML_VALUE_TYPE_UNSIGNED_LONG = 2,
+  NVML_VALUE_TYPE_UNSIGNED_LONG_LONG = 3,
+  NVML_VALUE_TYPE_SIGNED_LONG_LONG = 4,
+  NVML_VALUE_TYPE_SIGNED_INT = 5,
+  NVML_VALUE_TYPE_UNSIGNED_SHORT = 6,
+  NVML_VALUE_TYPE_COUNT
+} nvmlValueType_t;
+
+typedef union nvmlValue_st {
+  double dVal;
+  int siVal;
+  unsigned int uiVal;
+  unsigned long ulVal;
+  unsigned long long ullVal;
+  signed long long sllVal;
+  unsigned short usVal;
+} nvmlValue_t;
+
+typedef struct nvmlFieldValue_st {
+  unsigned int fieldId;
+  unsigned int scopeId;
+  long long timestamp;
+  long long latencyUsec;
+  nvmlValueType_t valueType;
+  nvmlReturn_t nvmlReturn;
+  nvmlValue_t value;
+} nvmlFieldValue_t;
+
+// NVML field IDs for NVLink throughput and CRC corrections (from nvml.h)
+#ifndef NVML_FI_DEV_NVLINK_THROUGHPUT_DATA_TX
+#define NVML_FI_DEV_NVLINK_THROUGHPUT_DATA_TX 138
+#endif
+#ifndef NVML_FI_DEV_NVLINK_THROUGHPUT_DATA_RX
+#define NVML_FI_DEV_NVLINK_THROUGHPUT_DATA_RX 139
+#endif
+#ifndef NVML_FI_DEV_NVLINK_CRC_FLIT_ERROR_COUNT_TOTAL
+#define NVML_FI_DEV_NVLINK_CRC_FLIT_ERROR_COUNT_TOTAL 38
+#endif
+#ifndef NVML_FI_DEV_NVLINK_CRC_DATA_ERROR_COUNT_TOTAL
+#define NVML_FI_DEV_NVLINK_CRC_DATA_ERROR_COUNT_TOTAL 45
+#endif
+#ifndef NVML_FI_DEV_NVLINK_ECC_DATA_ERROR_COUNT_TOTAL
+#define NVML_FI_DEV_NVLINK_ECC_DATA_ERROR_COUNT_TOTAL 160
+#endif
+
+// Init and shutdown
+
+static nvmlReturn_t (*nvmlInit)(void);
+
+static nvmlReturn_t (*nvmlShutdown)(void);
+
+// Static information and helper functions
+
+static nvmlReturn_t (*nvmlDeviceGetCount)(unsigned int *deviceCount);
+
+static nvmlReturn_t (*nvmlDeviceGetHandleByIndex)(unsigned int index, nvmlDevice_t *device);
+
+static const char *(*nvmlErrorString)(nvmlReturn_t);
+
+static nvmlReturn_t (*nvmlDeviceGetName)(nvmlDevice_t device, char *name, unsigned int length);
+static nvmlReturn_t (*nvmlDeviceGetUUID)(nvmlDevice_t device, char *uuid, unsigned int length);
+static bool bettertop_diagnostics_enabled;
+static bool bettertop_devices_truncated;
+
+static nvmlReturn_t (*nvmlDeviceGetArchitecture)(nvmlDevice_t device, unsigned int *arch);
+
+typedef struct {
+  char busIdLegacy[16];
+  unsigned int domain;
+  unsigned int bus;
+  unsigned int device;
+  unsigned int pciDeviceId;
+  // Added in NVML 2.285 API
+  unsigned int pciSubSystemId;
+  char busId[32];
+} nvmlPciInfo_t;
+
+static nvmlReturn_t (*nvmlDeviceGetPciInfo)(nvmlDevice_t device, nvmlPciInfo_t *pciInfo);
+
+static nvmlReturn_t (*nvmlDeviceGetMaxPcieLinkGeneration)(nvmlDevice_t device, unsigned int *maxLinkGen);
+
+static nvmlReturn_t (*nvmlDeviceGetMaxPcieLinkWidth)(nvmlDevice_t device, unsigned int *maxLinkWidth);
+
+typedef enum {
+  NVML_TEMPERATURE_THRESHOLD_SHUTDOWN = 0,
+  NVML_TEMPERATURE_THRESHOLD_SLOWDOWN = 1,
+  NVML_TEMPERATURE_THRESHOLD_MEM_MAX = 2,
+  NVML_TEMPERATURE_THRESHOLD_GPU_MAX = 3,
+  NVML_TEMPERATURE_THRESHOLD_ACOUSTIC_MIN = 4,
+  NVML_TEMPERATURE_THRESHOLD_ACOUSTIC_CURR = 5,
+  NVML_TEMPERATURE_THRESHOLD_ACOUSTIC_MAX = 6,
+} nvmlTemperatureThresholds_t;
+
+static nvmlReturn_t (*nvmlDeviceGetTemperatureThreshold)(nvmlDevice_t device, nvmlTemperatureThresholds_t thresholdType,
+                                                         unsigned int *temp);
+
+// Dynamic information extraction
+
+typedef enum {
+  NVML_CLOCK_GRAPHICS = 0,
+  NVML_CLOCK_SM = 1,
+  NVML_CLOCK_MEM = 2,
+  NVML_CLOCK_VIDEO = 3,
+} nvmlClockType_t;
+
+typedef struct {
+  unsigned int gpu;
+  unsigned int memory;
+} nvmlUtilization_t;
+
+static nvmlReturn_t (*nvmlDeviceGetUtilizationRates)(nvmlDevice_t device, nvmlUtilization_t *utilization);
+
+typedef struct {
+  unsigned long long total;
+  unsigned long long free;
+  unsigned long long used;
+} nvmlMemory_v1_t;
+
+typedef struct {
+  unsigned int version;
+  unsigned long long total;
+  unsigned long long reserved;
+  unsigned long long free;
+  unsigned long long used;
+} nvmlMemory_v2_t;
+
+// NVIDIA's nvmlMemory_v2 macro is NVML_STRUCT_VERSION(Memory, 2), not the
+// literal 2: sizeof(nvmlMemory_v2_t) occupies the low bits.
+#define NVML_MEMORY_V2 ((unsigned int)(sizeof(nvmlMemory_v2_t) | (2u << 24U)))
+
+static nvmlReturn_t (*nvmlDeviceGetMemoryInfo)(nvmlDevice_t device, nvmlMemory_v1_t *memory);
+static nvmlReturn_t (*nvmlDeviceGetMemoryInfo_v2)(nvmlDevice_t device, nvmlMemory_v2_t *memory);
+
+static nvmlReturn_t (*nvmlDeviceGetCurrPcieLinkGeneration)(nvmlDevice_t device, unsigned int *currLinkGen);
+
+static nvmlReturn_t (*nvmlDeviceGetCurrPcieLinkWidth)(nvmlDevice_t device, unsigned int *currLinkWidth);
+
+// Bus type of the device (nvmlBusType_t in nvml.h, which is not included here).
+// This is the authoritative signal for whether a device is really behind a PCIe
+// link. The function may be absent on older drivers.
+#define NVML_BUS_TYPE_PCIE 2
+static nvmlReturn_t (*nvmlDeviceGetBusType)(nvmlDevice_t device, unsigned int *type);
+
+typedef enum {
+  NVML_PCIE_UTIL_TX_BYTES = 0,
+  NVML_PCIE_UTIL_RX_BYTES = 1,
+} nvmlPcieUtilCounter_t;
+
+static nvmlReturn_t (*nvmlDeviceGetPcieThroughput)(nvmlDevice_t device, nvmlPcieUtilCounter_t counter,
+                                                   unsigned int *value);
+
+typedef enum {
+  NVML_TEMPERATURE_GPU = 0,
+} nvmlTemperatureSensors_t;
+
+typedef enum {
+  NVML_MEMORY_ERROR_TYPE_CORRECTED = 0,
+  NVML_MEMORY_ERROR_TYPE_UNCORRECTED = 1,
+} nvmlMemoryErrorType_t;
+
+typedef enum {
+  NVML_VOLATILE_ECC = 0,
+  NVML_AGGREGATE_ECC = 1,
+} nvmlEccCounterType_t;
+
+static nvmlReturn_t (*nvmlDeviceGetTemperature)(nvmlDevice_t device, nvmlTemperatureSensors_t sensorType,
+                                                unsigned int *temp);
+
+static nvmlReturn_t (*nvmlDeviceGetPowerUsage)(nvmlDevice_t device, unsigned int *power);
+
+static nvmlReturn_t (*nvmlDeviceGetEnforcedPowerLimit)(nvmlDevice_t device, unsigned int *limit);
+
+static nvmlReturn_t (*nvmlDeviceGetTotalEccErrors)(nvmlDevice_t device, nvmlMemoryErrorType_t errorType,
+                                                   nvmlEccCounterType_t counterType, unsigned long long *eccCounts);
+
+// Processes running on GPU
+
+typedef struct {
+  unsigned int pid;
+  unsigned long long usedGpuMemory;
+} nvmlProcessInfo_v1_t;
+
+typedef struct {
+  unsigned int pid;
+  unsigned long long usedGpuMemory;
+  unsigned int gpuInstanceId;
+  unsigned int computeInstanceId;
+} nvmlProcessInfo_v2_t;
+
+typedef struct {
+  unsigned int pid;
+  unsigned long long usedGpuMemory;
+  unsigned int gpuInstanceId;
+  unsigned int computeInstanceId;
+  // This is present in https://github.com/NVIDIA/DCGM/blob/master/sdk/nvidia/nvml/nvml.h#L294 but not the latest driver nvml.h
+  // unsigned long long usedGpuCcProtectedMemory;
+} nvmlProcessInfo_v3_t;
+
+static nvmlReturn_t (*nvmlDeviceGetGraphicsRunningProcesses_v1)(nvmlDevice_t device, unsigned int *infoCount,
+                                                                nvmlProcessInfo_v1_t *infos);
+static nvmlReturn_t (*nvmlDeviceGetGraphicsRunningProcesses_v2)(nvmlDevice_t device, unsigned int *infoCount,
+                                                                nvmlProcessInfo_v2_t *infos);
+static nvmlReturn_t (*nvmlDeviceGetGraphicsRunningProcesses_v3)(nvmlDevice_t device, unsigned int *infoCount,
+                                                                nvmlProcessInfo_v3_t *infos);
+
+static nvmlReturn_t (*nvmlDeviceGetComputeRunningProcesses_v1)(nvmlDevice_t device, unsigned int *infoCount,
+                                                               nvmlProcessInfo_v1_t *infos);
+static nvmlReturn_t (*nvmlDeviceGetComputeRunningProcesses_v2)(nvmlDevice_t device, unsigned int *infoCount,
+                                                               nvmlProcessInfo_v2_t *infos);
+static nvmlReturn_t (*nvmlDeviceGetComputeRunningProcesses_v3)(nvmlDevice_t device, unsigned int *infoCount,
+                                                               nvmlProcessInfo_v3_t *infos);
+
+static nvmlReturn_t (*nvmlDeviceGetMPSComputeRunningProcesses_v1)(nvmlDevice_t device, unsigned int *infoCount,
+                                                                  nvmlProcessInfo_v1_t *infos);
+static nvmlReturn_t (*nvmlDeviceGetMPSComputeRunningProcesses_v2)(nvmlDevice_t device, unsigned int *infoCount,
+                                                                  nvmlProcessInfo_v2_t *infos);
+static nvmlReturn_t (*nvmlDeviceGetMPSComputeRunningProcesses_v3)(nvmlDevice_t device, unsigned int *infoCount,
+                                                                  nvmlProcessInfo_v3_t *infos);
+
+// Common interface passing void*
+static nvmlReturn_t (*nvmlDeviceGetGraphicsRunningProcesses[4])(nvmlDevice_t device, unsigned int *infoCount,
+                                                                void *infos);
+static nvmlReturn_t (*nvmlDeviceGetComputeRunningProcesses[4])(nvmlDevice_t device, unsigned int *infoCount,
+                                                               void *infos);
+static nvmlReturn_t (*nvmlDeviceGetMPSComputeRunningProcesses[4])(nvmlDevice_t device, unsigned int *infoCount,
+                                                                  void *infos);
+
+#define NVML_DEVICE_MIG_DISABLE 0x0
+#define NVML_DEVICE_MIG_ENABLE 0x1
+nvmlReturn_t (*nvmlDeviceGetMigMode)(nvmlDevice_t device, unsigned int *currentMode, unsigned int *pendingMode);
+
+// nvmlDeviceArchitecture_t values (from nvml.h). nvtop does not include nvml.h,
+// so the NVML_DEVICE_ARCH_* constants are mirrored here.
+#define NVML_DEVICE_ARCH_KEPLER 2
+#define NVML_DEVICE_ARCH_MAXWELL 3
+#define NVML_DEVICE_ARCH_PASCAL 4
+#define NVML_DEVICE_ARCH_VOLTA 5
+#define NVML_DEVICE_ARCH_TURING 6
+#define NVML_DEVICE_ARCH_AMPERE 7
+#define NVML_DEVICE_ARCH_ADA 8
+#define NVML_DEVICE_ARCH_HOPPER 9
+#define NVML_DEVICE_ARCH_BLACKWELL 10
+#define NVML_DEVICE_ARCH_RUBIN 13
+// Non-GPU accelerators, present on Tegra/NPU platforms
+#define NVML_DEVICE_ARCH_DLA 11
+#define NVML_DEVICE_ARCH_DLA2 12
+#define NVML_DEVICE_ARCH_NPU3 15
+#define NVML_DEVICE_ARCH_UNKNOWN 0xffffffff
+
+// NVLink functions (not present in older NVML versions, gracefully handled)
+static nvmlReturn_t (*nvmlDeviceGetNvLinkState)(nvmlDevice_t device, unsigned int link, unsigned int *isActive);
+static nvmlReturn_t (*nvmlDeviceGetNvLinkVersion)(nvmlDevice_t device, unsigned int link, unsigned int *version);
+static nvmlReturn_t (*nvmlDeviceGetFieldValues)(nvmlDevice_t, unsigned int, nvmlFieldValue_t *);
+
+static void *libnvidia_ml_handle;
+
+static nvmlReturn_t last_nvml_return_status = NVML_SUCCESS;
+static char didnt_call_gpuinfo_init[] = "The NVIDIA extraction has not been initialized, please call "
+                                        "gpuinfo_nvidia_init\n";
+static const char *local_error_string = didnt_call_gpuinfo_init;
+static size_t process_info_array_size;
+static size_t process_info_buffer_bytes;
+static char *process_info_buffer;
+
+static bool ensure_process_info_capacity(size_t count, size_t element_size) {
+  if (count && element_size > SIZE_MAX / count) {
+    errno = ENOMEM;
+    return false;
+  }
+  size_t needed = count * element_size;
+  if (needed <= process_info_buffer_bytes)
+    return true;
+  char *buffer = reallocarray(process_info_buffer, count, element_size);
+  if (!buffer)
+    return false;
+  process_info_buffer = buffer;
+  process_info_buffer_bytes = needed;
+  return true;
+}
+
+// Processes GPU Utilization
+
+typedef struct {
+  unsigned int pid;
+  unsigned long long timeStamp;
+  unsigned int smUtil;
+  unsigned int memUtil;
+  unsigned int encUtil;
+  unsigned int decUtil;
+} nvmlProcessUtilizationSample_t;
+
+nvmlReturn_t (*nvmlDeviceGetProcessUtilization)(nvmlDevice_t device, nvmlProcessUtilizationSample_t *utilization,
+                                                unsigned int *processSamplesCount,
+                                                unsigned long long lastSeenTimeStamp);
+
+struct gpu_info_nvidia {
+  struct gpu_info base;
+  struct list_head allocate_list;
+
+  nvmlDevice_t gpuhandle;
+  char pci_bus_id[32];
+  char uuid[80];
+  bool processes_truncated;
+  bool isInMigMode;
+  unsigned long long last_utilization_timestamp;
+
+  // NVLink throughput via NVML API (data counters, aggregate across all links)
+  unsigned long long nvlink_last_tx; // Cumulative aggregate TX for delta computation
+  unsigned long long nvlink_last_rx; // Cumulative aggregate RX for delta computation
+  nvtop_time nvlink_last_poll_time;  // Timestamp for poll throttling
+
+  // NVLink CRC/ECC error baselines (cumulative since boot, tracked per-device).
+  // All values come from nvmlDeviceGetFieldValues: flit CRC (field 38) and
+  // data CRC (field 45) are summed per link, ECC (field 160) is a device aggregate.
+  unsigned long long baseline_errors;      // Cumulative flit CRC errors at last read
+  unsigned long long baseline_corrections; // Cumulative CRC data errors at last read
+  unsigned long long baseline_ecc_errors;  // Cumulative ECC data errors at last read
+  bool baseline_errors_read;               // True after first read establishes the flit CRC baseline
+  bool baseline_corrections_read;          // True after first read establishes the CRC data baseline
+  bool baseline_ecc_errors_read;           // True after first read establishes the ECC baseline
+
+  // Display-ready CRC/ECC counts (computed in refresh_dynamic_info)
+  unsigned long long display_errors;      // Flit CRC errors since nvtop launch
+  unsigned long long display_corrections; // CRC data errors since nvtop launch
+  unsigned long long display_ecc_errors;  // ECC data errors since nvtop launch
+
+  // Cached NVLink hardware properties (probe once, reuse forever)
+  bool nvlink_probed;                   // true after first probe, regardless of result
+  unsigned int nvlink_cached_linkcount; // 0 = no NVLink links
+  unsigned int nvlink_cached_version;   // Marketing version, 0 = not yet probed
+
+  // Cached nvlink_info struct: populated during refresh_dynamic_info,
+  // returned by nvtop_get_nvlink_info in the draw path to avoid redundant
+  // NVML calls and CLI forks on every draw cycle.
+  struct nvlink_info cached_nvlink_info;
+  bool cached_nvlink_info_populated;
+};
+
+static LIST_HEAD(allocations);
+
+static bool gpuinfo_nvidia_init(void);
+static void gpuinfo_nvidia_shutdown(void);
+static const char *gpuinfo_nvidia_last_error_string(void);
+static bool gpuinfo_nvidia_get_device_handles(struct list_head *devices, unsigned *count);
+static void gpuinfo_nvidia_populate_static_info(struct gpu_info *_gpu_info);
+static void gpuinfo_nvidia_refresh_dynamic_info(struct gpu_info *_gpu_info);
+static void gpuinfo_nvidia_get_running_processes(struct gpu_info *_gpu_info);
+
+// Forward declaration for nvlink_refresh_cached_info (defined later, called from refresh_dynamic_info)
+// Populates gpu_info->cached_nvlink_info with throughput + error data.
+static void nvlink_refresh_cached_info(struct gpu_info_nvidia *gpu_info, unsigned int linkCount);
+
+// Remap raw NVML NVLink protocol version to the marketing version (forward declaration)
+static unsigned int nvlink_marketing_version(unsigned int raw_version);
+
+// Probe NVLink link count and version, caching results in gpu_info_nvidia to avoid
+// repeated NVML API calls on every refresh cycle. Returns cached linkCount (0 if no NVLink).
+unsigned nvlink_probe_and_cache(struct gpu_info_nvidia *gpu_info);
+
+struct gpu_vendor gpu_vendor_nvidia = {
+    .init = gpuinfo_nvidia_init,
+    .shutdown = gpuinfo_nvidia_shutdown,
+    .last_error_string = gpuinfo_nvidia_last_error_string,
+    .get_device_handles = gpuinfo_nvidia_get_device_handles,
+    .populate_static_info = gpuinfo_nvidia_populate_static_info,
+    .refresh_dynamic_info = gpuinfo_nvidia_refresh_dynamic_info,
+    .refresh_running_processes = gpuinfo_nvidia_get_running_processes,
+    .name = "NVIDIA",
+};
+
+__attribute__((constructor)) static void init_extract_gpuinfo_nvidia(void) { register_gpu_vendor(&gpu_vendor_nvidia); }
+
+void nvtop_nvidia_set_diagnostics(bool enabled) { bettertop_diagnostics_enabled = enabled; }
+
+bool nvtop_nvidia_get_identity(struct gpu_info *info, char *bus_id, size_t bus_id_size, char *uuid,
+                               size_t uuid_size) {
+  if (!info || !bus_id || !bus_id_size || !uuid || !uuid_size)
+    return false;
+  struct gpu_info_nvidia *gpu_info = container_of(info, struct gpu_info_nvidia, base);
+  snprintf(bus_id, bus_id_size, "%s", gpu_info->pci_bus_id);
+  snprintf(uuid, uuid_size, "%s", gpu_info->uuid);
+  return true;
+}
+
+bool nvtop_nvidia_processes_truncated(struct gpu_info *info) {
+  return info && container_of(info, struct gpu_info_nvidia, base)->processes_truncated;
+}
+
+bool nvtop_nvidia_devices_truncated(void) { return bettertop_devices_truncated; }
+
+int nvtop_nvidia_last_status(void) { return last_nvml_return_status; }
+
+/*
+ *
+ * This function loads the libnvidia-ml.so shared object, initializes the
+ * required function pointers and calls the nvidia library initialization
+ * function. Returns true if everything has been initialized successfully. If
+ * false is returned, the cause of the error can be retrieved by calling the
+ * function gpuinfo_nvidia_last_error_string.
+ *
+ */
+static bool gpuinfo_nvidia_init(void) {
+
+  libnvidia_ml_handle = dlopen("libnvidia-ml.so", RTLD_LAZY);
+  if (!libnvidia_ml_handle)
+    libnvidia_ml_handle = dlopen("libnvidia-ml.so.1", RTLD_LAZY);
+  if (!libnvidia_ml_handle) {
+    local_error_string = dlerror();
+    return false;
+  }
+
+  // Default to last version
+  nvmlInit = dlsym(libnvidia_ml_handle, "nvmlInit_v2");
+  if (!nvmlInit)
+    nvmlInit = dlsym(libnvidia_ml_handle, "nvmlInit");
+  if (!nvmlInit)
+    goto init_error_clean_exit;
+
+  nvmlShutdown = dlsym(libnvidia_ml_handle, "nvmlShutdown");
+  if (!nvmlShutdown)
+    goto init_error_clean_exit;
+
+  // Default to last version if available
+  nvmlDeviceGetCount = dlsym(libnvidia_ml_handle, "nvmlDeviceGetCount_v2");
+  if (!nvmlDeviceGetCount)
+    nvmlDeviceGetCount = dlsym(libnvidia_ml_handle, "nvmlDeviceGetCount");
+  if (!nvmlDeviceGetCount)
+    goto init_error_clean_exit;
+
+  nvmlDeviceGetHandleByIndex = dlsym(libnvidia_ml_handle, "nvmlDeviceGetHandleByIndex_v2");
+  if (!nvmlDeviceGetHandleByIndex)
+    nvmlDeviceGetHandleByIndex = dlsym(libnvidia_ml_handle, "nvmlDeviceGetHandleByIndex");
+  if (!nvmlDeviceGetHandleByIndex)
+    goto init_error_clean_exit;
+
+  nvmlErrorString = dlsym(libnvidia_ml_handle, "nvmlErrorString");
+
+  nvmlDeviceGetName = dlsym(libnvidia_ml_handle, "nvmlDeviceGetName");
+  if (!nvmlDeviceGetName)
+    goto init_error_clean_exit;
+
+  nvmlDeviceGetUUID = dlsym(libnvidia_ml_handle, "nvmlDeviceGetUUID");
+
+  // Optional; not present in older drivers, absence is not an error
+  nvmlDeviceGetArchitecture = dlsym(libnvidia_ml_handle, "nvmlDeviceGetArchitecture");
+
+  nvmlDeviceGetPciInfo = dlsym(libnvidia_ml_handle, "nvmlDeviceGetPciInfo_v3");
+  if (!nvmlDeviceGetPciInfo)
+    nvmlDeviceGetPciInfo = dlsym(libnvidia_ml_handle, "nvmlDeviceGetPciInfo_v2");
+  if (!nvmlDeviceGetPciInfo)
+    nvmlDeviceGetPciInfo = dlsym(libnvidia_ml_handle, "nvmlDeviceGetPciInfo");
+  if (!nvmlDeviceGetPciInfo)
+    goto init_error_clean_exit;
+
+  nvmlDeviceGetMaxPcieLinkGeneration = dlsym(libnvidia_ml_handle, "nvmlDeviceGetMaxPcieLinkGeneration");
+
+  nvmlDeviceGetMaxPcieLinkWidth = dlsym(libnvidia_ml_handle, "nvmlDeviceGetMaxPcieLinkWidth");
+
+  nvmlDeviceGetTemperatureThreshold = dlsym(libnvidia_ml_handle, "nvmlDeviceGetTemperatureThreshold");
+
+  nvmlDeviceGetUtilizationRates = dlsym(libnvidia_ml_handle, "nvmlDeviceGetUtilizationRates");
+
+  // Get v2 and fallback to v1
+  nvmlDeviceGetMemoryInfo_v2 = dlsym(libnvidia_ml_handle, "nvmlDeviceGetMemoryInfo_v2");
+  nvmlDeviceGetMemoryInfo = dlsym(libnvidia_ml_handle, "nvmlDeviceGetMemoryInfo");
+
+  nvmlDeviceGetCurrPcieLinkGeneration = dlsym(libnvidia_ml_handle, "nvmlDeviceGetCurrPcieLinkGeneration");
+
+  nvmlDeviceGetCurrPcieLinkWidth = dlsym(libnvidia_ml_handle, "nvmlDeviceGetCurrPcieLinkWidth");
+
+  // Optional: lets us avoid reporting a PCIe link on devices that are not on a
+  // PCIe bus (e.g. NVLink-C2C SoCs). Absent on older drivers -> keep the
+  // previous behaviour of probing the PCIe link.
+  nvmlDeviceGetBusType = dlsym(libnvidia_ml_handle, "nvmlDeviceGetBusType");
+
+  // PCIe throughput is an opt-in diagnostic because some drivers block here.
+  nvmlDeviceGetPcieThroughput = dlsym(libnvidia_ml_handle, "nvmlDeviceGetPcieThroughput");
+
+  nvmlDeviceGetTemperature = dlsym(libnvidia_ml_handle, "nvmlDeviceGetTemperature");
+
+  nvmlDeviceGetPowerUsage = dlsym(libnvidia_ml_handle, "nvmlDeviceGetPowerUsage");
+
+  nvmlDeviceGetEnforcedPowerLimit = dlsym(libnvidia_ml_handle, "nvmlDeviceGetEnforcedPowerLimit");
+
+  nvmlDeviceGetGraphicsRunningProcesses_v3 = dlsym(libnvidia_ml_handle, "nvmlDeviceGetGraphicsRunningProcesses_v3");
+  nvmlDeviceGetGraphicsRunningProcesses_v2 = dlsym(libnvidia_ml_handle, "nvmlDeviceGetGraphicsRunningProcesses_v2");
+  nvmlDeviceGetGraphicsRunningProcesses_v1 = dlsym(libnvidia_ml_handle, "nvmlDeviceGetGraphicsRunningProcesses");
+  nvmlDeviceGetGraphicsRunningProcesses[1] =
+      (nvmlReturn_t(*)(nvmlDevice_t, unsigned int *, void *))nvmlDeviceGetGraphicsRunningProcesses_v1;
+  nvmlDeviceGetGraphicsRunningProcesses[2] =
+      (nvmlReturn_t(*)(nvmlDevice_t, unsigned int *, void *))nvmlDeviceGetGraphicsRunningProcesses_v2;
+  nvmlDeviceGetGraphicsRunningProcesses[3] =
+      (nvmlReturn_t(*)(nvmlDevice_t, unsigned int *, void *))nvmlDeviceGetGraphicsRunningProcesses_v3;
+
+  nvmlDeviceGetComputeRunningProcesses_v3 = dlsym(libnvidia_ml_handle, "nvmlDeviceGetComputeRunningProcesses_v3");
+  nvmlDeviceGetComputeRunningProcesses_v2 = dlsym(libnvidia_ml_handle, "nvmlDeviceGetComputeRunningProcesses_v2");
+  nvmlDeviceGetComputeRunningProcesses_v1 = dlsym(libnvidia_ml_handle, "nvmlDeviceGetComputeRunningProcesses");
+  nvmlDeviceGetComputeRunningProcesses[1] =
+      (nvmlReturn_t(*)(nvmlDevice_t, unsigned int *, void *))nvmlDeviceGetComputeRunningProcesses_v1;
+  nvmlDeviceGetComputeRunningProcesses[2] =
+      (nvmlReturn_t(*)(nvmlDevice_t, unsigned int *, void *))nvmlDeviceGetComputeRunningProcesses_v2;
+  nvmlDeviceGetComputeRunningProcesses[3] =
+      (nvmlReturn_t(*)(nvmlDevice_t, unsigned int *, void *))nvmlDeviceGetComputeRunningProcesses_v3;
+
+  // These functions were not available in older NVML libs; don't error if not present
+  nvmlDeviceGetMPSComputeRunningProcesses_v3 = dlsym(libnvidia_ml_handle, "nvmlDeviceGetMPSComputeRunningProcesses_v3");
+  nvmlDeviceGetMPSComputeRunningProcesses_v2 = dlsym(libnvidia_ml_handle, "nvmlDeviceGetMPSComputeRunningProcesses_v2");
+  nvmlDeviceGetMPSComputeRunningProcesses_v1 = dlsym(libnvidia_ml_handle, "nvmlDeviceGetMPSComputeRunningProcesses");
+
+  nvmlDeviceGetMPSComputeRunningProcesses[1] =
+      (nvmlReturn_t(*)(nvmlDevice_t, unsigned int *, void *))nvmlDeviceGetMPSComputeRunningProcesses_v1;
+  nvmlDeviceGetMPSComputeRunningProcesses[2] =
+      (nvmlReturn_t(*)(nvmlDevice_t, unsigned int *, void *))nvmlDeviceGetMPSComputeRunningProcesses_v2;
+  nvmlDeviceGetMPSComputeRunningProcesses[3] =
+      (nvmlReturn_t(*)(nvmlDevice_t, unsigned int *, void *))nvmlDeviceGetMPSComputeRunningProcesses_v3;
+  // These ones might not be available
+  nvmlDeviceGetProcessUtilization = dlsym(libnvidia_ml_handle, "nvmlDeviceGetProcessUtilization");
+  nvmlDeviceGetMigMode = dlsym(libnvidia_ml_handle, "nvmlDeviceGetMigMode");
+
+  // NVLink functions (optional - not available on all drivers/hardware)
+  nvmlDeviceGetNvLinkState = dlsym(libnvidia_ml_handle, "nvmlDeviceGetNvLinkState");
+  nvmlDeviceGetNvLinkVersion = dlsym(libnvidia_ml_handle, "nvmlDeviceGetNvLinkVersion");
+  nvmlDeviceGetFieldValues = dlsym(libnvidia_ml_handle, "nvmlDeviceGetFieldValues");
+
+  last_nvml_return_status = nvmlInit();
+  if (last_nvml_return_status != NVML_SUCCESS) {
+    return false;
+  }
+  local_error_string = NULL;
+
+  return true;
+
+init_error_clean_exit:
+  dlclose(libnvidia_ml_handle);
+  libnvidia_ml_handle = NULL;
+  return false;
+}
+
+static void gpuinfo_nvidia_shutdown(void) {
+  if (libnvidia_ml_handle) {
+    nvmlShutdown();
+    dlclose(libnvidia_ml_handle);
+    libnvidia_ml_handle = NULL;
+    local_error_string = didnt_call_gpuinfo_init;
+  }
+
+  struct gpu_info_nvidia *allocated, *tmp;
+
+  list_for_each_entry_safe(allocated, tmp, &allocations, allocate_list) {
+    list_del(&allocated->allocate_list);
+    free(allocated);
+  }
+}
+
+static const char *gpuinfo_nvidia_last_error_string(void) {
+  if (local_error_string) {
+    return local_error_string;
+  } else if (libnvidia_ml_handle && nvmlErrorString) {
+    return nvmlErrorString(last_nvml_return_status);
+  } else {
+    return "An unanticipated error occurred while accessing NVIDIA GPU "
+           "information\n";
+  }
+}
+
+static bool gpuinfo_nvidia_get_device_handles(struct list_head *devices, unsigned *count) {
+
+  if (!libnvidia_ml_handle)
+    return false;
+
+  unsigned num_devices;
+  last_nvml_return_status = nvmlDeviceGetCount(&num_devices);
+  if (last_nvml_return_status != NVML_SUCCESS)
+    return false;
+
+  if (num_devices == 0) {
+    *count = 0;
+    return true;
+  }
+  bettertop_devices_truncated = num_devices > BETTERTOP_GPU_MAX_DEVICES;
+  if (num_devices > BETTERTOP_GPU_MAX_DEVICES)
+    num_devices = BETTERTOP_GPU_MAX_DEVICES;
+
+  struct gpu_info_nvidia *gpu_infos = calloc(num_devices, sizeof(*gpu_infos));
+  if (!gpu_infos) {
+    local_error_string = strerror(errno);
+    return false;
+  }
+
+  list_add(&gpu_infos[0].allocate_list, &allocations);
+
+  *count = 0;
+  for (unsigned int i = 0; i < num_devices; ++i) {
+    last_nvml_return_status = nvmlDeviceGetHandleByIndex(i, &gpu_infos[*count].gpuhandle);
+    if (last_nvml_return_status == NVML_SUCCESS) {
+      gpu_infos[*count].base.vendor = &gpu_vendor_nvidia;
+      nvmlPciInfo_t pciInfo = {0};
+      nvmlReturn_t pciInfoRet = nvmlDeviceGetPciInfo(gpu_infos[*count].gpuhandle, &pciInfo);
+      if (pciInfoRet == NVML_SUCCESS) {
+        pciInfo.busIdLegacy[sizeof(pciInfo.busIdLegacy) - 1] = '\0';
+        pciInfo.busId[sizeof(pciInfo.busId) - 1] = '\0';
+        strncpy(gpu_infos[*count].base.pdev, pciInfo.busIdLegacy, PDEV_LEN - 1);
+        gpu_infos[*count].base.pdev[PDEV_LEN - 1] = '\0';
+        snprintf(gpu_infos[*count].pci_bus_id, sizeof(gpu_infos[*count].pci_bus_id), "%s",
+                 pciInfo.busId[0] ? pciInfo.busId : pciInfo.busIdLegacy);
+        if (nvmlDeviceGetUUID &&
+            nvmlDeviceGetUUID(gpu_infos[*count].gpuhandle, gpu_infos[*count].uuid,
+                              sizeof(gpu_infos[*count].uuid)) != NVML_SUCCESS)
+          gpu_infos[*count].uuid[0] = '\0';
+        gpu_infos[*count].uuid[sizeof(gpu_infos[*count].uuid) - 1] = '\0';
+        list_add_tail(&gpu_infos[*count].base.list, devices);
+        *count += 1;
+      }
+    }
+  }
+
+  return true;
+}
+
+static void gpuinfo_nvidia_populate_static_info(struct gpu_info *_gpu_info) {
+  struct gpu_info_nvidia *gpu_info = container_of(_gpu_info, struct gpu_info_nvidia, base);
+  struct gpuinfo_static_info *static_info = &gpu_info->base.static_info;
+  nvmlDevice_t device = gpu_info->gpuhandle;
+
+  static_info->integrated_graphics = false;
+  static_info->encode_decode_shared = false;
+  RESET_ALL(static_info->valid);
+
+  last_nvml_return_status = nvmlDeviceGetName(device, static_info->device_name, MAX_DEVICE_NAME);
+  if (last_nvml_return_status == NVML_SUCCESS)
+    SET_VALID(gpuinfo_device_name_valid, static_info->valid);
+
+  if (nvmlDeviceGetArchitecture) {
+    unsigned int arch = 0;
+    if (nvmlDeviceGetArchitecture(device, &arch) == NVML_SUCCESS) {
+      const char *arch_name = NULL;
+      switch (arch) {
+      case NVML_DEVICE_ARCH_KEPLER:
+        arch_name = "Kepler";
+        break;
+      case NVML_DEVICE_ARCH_MAXWELL:
+        arch_name = "Maxwell";
+        break;
+      case NVML_DEVICE_ARCH_PASCAL:
+        arch_name = "Pascal";
+        break;
+      case NVML_DEVICE_ARCH_VOLTA:
+        arch_name = "Volta";
+        break;
+      case NVML_DEVICE_ARCH_TURING:
+        arch_name = "Turing";
+        break;
+      case NVML_DEVICE_ARCH_AMPERE:
+        arch_name = "Ampere";
+        break;
+      case NVML_DEVICE_ARCH_ADA:
+        arch_name = "Ada";
+        break;
+      case NVML_DEVICE_ARCH_HOPPER:
+        arch_name = "Hopper";
+        break;
+      case NVML_DEVICE_ARCH_BLACKWELL:
+        arch_name = "Blackwell";
+        break;
+      case NVML_DEVICE_ARCH_RUBIN:
+        arch_name = "Rubin";
+        break;
+      // Non-GPU accelerators, reported for completeness
+      case NVML_DEVICE_ARCH_DLA:
+        arch_name = "DLA";
+        break;
+      case NVML_DEVICE_ARCH_DLA2:
+        arch_name = "DLA2";
+        break;
+      case NVML_DEVICE_ARCH_NPU3:
+        arch_name = "NPU3";
+        break;
+      default:
+        // NVML_DEVICE_ARCH_UNKNOWN, reserved values and future architectures
+        break;
+      }
+      if (arch_name) {
+        strncpy(static_info->device_architecture, arch_name, MAX_DEVICE_NAME - 1);
+        static_info->device_architecture[MAX_DEVICE_NAME - 1] = '\0';
+        SET_VALID(gpuinfo_device_architecture_valid, static_info->valid);
+      }
+    }
+  }
+
+  if (bettertop_diagnostics_enabled) {
+    if (nvmlDeviceGetMaxPcieLinkGeneration) {
+      last_nvml_return_status = nvmlDeviceGetMaxPcieLinkGeneration(device, &static_info->max_pcie_gen);
+      if (last_nvml_return_status == NVML_SUCCESS)
+        SET_VALID(gpuinfo_max_pcie_gen_valid, static_info->valid);
+    }
+    if (nvmlDeviceGetMaxPcieLinkWidth) {
+      last_nvml_return_status = nvmlDeviceGetMaxPcieLinkWidth(device, &static_info->max_pcie_link_width);
+      if (last_nvml_return_status == NVML_SUCCESS)
+        SET_VALID(gpuinfo_max_pcie_link_width_valid, static_info->valid);
+    }
+    if (nvmlDeviceGetTemperatureThreshold) {
+      last_nvml_return_status = nvmlDeviceGetTemperatureThreshold(device, NVML_TEMPERATURE_THRESHOLD_SHUTDOWN,
+                                                                  &static_info->temperature_shutdown_threshold);
+      if (last_nvml_return_status == NVML_SUCCESS)
+        SET_VALID(gpuinfo_temperature_shutdown_threshold_valid, static_info->valid);
+
+      last_nvml_return_status = nvmlDeviceGetTemperatureThreshold(device, NVML_TEMPERATURE_THRESHOLD_SLOWDOWN,
+                                                                  &static_info->temperature_slowdown_threshold);
+      if (last_nvml_return_status == NVML_SUCCESS)
+        SET_VALID(gpuinfo_temperature_slowdown_threshold_valid, static_info->valid);
+    }
+  }
+}
+
+static void gpuinfo_nvidia_refresh_dynamic_info(struct gpu_info *_gpu_info) {
+  struct gpu_info_nvidia *gpu_info = container_of(_gpu_info, struct gpu_info_nvidia, base);
+  struct gpuinfo_dynamic_info *dynamic_info = &gpu_info->base.dynamic_info;
+  nvmlDevice_t device = gpu_info->gpuhandle;
+
+  RESET_ALL(dynamic_info->valid);
+
+  if (nvmlDeviceGetUtilizationRates) {
+    nvmlUtilization_t utilization_percentages;
+    last_nvml_return_status = nvmlDeviceGetUtilizationRates(device, &utilization_percentages);
+    if (last_nvml_return_status == NVML_SUCCESS && utilization_percentages.gpu <= 100 &&
+        utilization_percentages.memory <= 100) {
+      SET_GPUINFO_DYNAMIC(dynamic_info, gpu_util_rate, utilization_percentages.gpu);
+      SET_GPUINFO_DYNAMIC(dynamic_info, mem_util_rate, utilization_percentages.memory);
+    }
+  }
+
+  // Device memory info (total,used,free)
+  bool got_meminfo = false;
+
+  if (nvmlDeviceGetMemoryInfo_v2) {
+    nvmlMemory_v2_t memory_info;
+    memory_info.version = NVML_MEMORY_V2;
+    last_nvml_return_status = nvmlDeviceGetMemoryInfo_v2(device, &memory_info);
+    if (last_nvml_return_status == NVML_SUCCESS) {
+      // Check if this is a unified memory GPU (total == 0 indicates unified memory)
+      got_meminfo = true;
+      if (memory_info.total > 0 && memory_info.total != ULLONG_MAX && memory_info.used <= memory_info.total) {
+        SET_GPUINFO_DYNAMIC(dynamic_info, total_memory, memory_info.total);
+        SET_GPUINFO_DYNAMIC(dynamic_info, used_memory, memory_info.used);
+        SET_GPUINFO_DYNAMIC(dynamic_info, free_memory, memory_info.free);
+        if (!GPUINFO_DYNAMIC_FIELD_VALID(dynamic_info, mem_util_rate))
+          SET_GPUINFO_DYNAMIC(dynamic_info, mem_util_rate, memory_info.used * 100 / memory_info.total);
+      }
+    } else if (last_nvml_return_status == NVML_ERROR_NOT_SUPPORTED) {
+      got_meminfo = true;
+    }
+  }
+  if (!got_meminfo && nvmlDeviceGetMemoryInfo) {
+    nvmlMemory_v1_t memory_info;
+    last_nvml_return_status = nvmlDeviceGetMemoryInfo(device, &memory_info);
+    if (last_nvml_return_status == NVML_SUCCESS) {
+      // Check if this is a unified memory GPU (total == 0 indicates unified memory)
+      if (memory_info.total > 0 && memory_info.total != ULLONG_MAX && memory_info.used <= memory_info.total) {
+        SET_GPUINFO_DYNAMIC(dynamic_info, total_memory, memory_info.total);
+        SET_GPUINFO_DYNAMIC(dynamic_info, used_memory, memory_info.used);
+        SET_GPUINFO_DYNAMIC(dynamic_info, free_memory, memory_info.free);
+        if (!GPUINFO_DYNAMIC_FIELD_VALID(dynamic_info, mem_util_rate))
+          SET_GPUINFO_DYNAMIC(dynamic_info, mem_util_rate, memory_info.used * 100 / memory_info.total);
+      }
+    } else if (last_nvml_return_status == NVML_ERROR_NOT_SUPPORTED) {
+      got_meminfo = true;
+    }
+  }
+
+  // Pcie generation and width used by the device.
+  // Only report these when NVML confirms the device is on a PCIe bus. Some SoCs
+  // (e.g. DGX Spark / GB10) are attached over NVLink-C2C, yet the PCIe link
+  // queries still return placeholder values (GEN 1 @ 1x) that would be
+  // misleading. The bus type is authoritative here rather than the memory model.
+  if (bettertop_diagnostics_enabled) {
+    bool device_on_pcie_bus = nvmlDeviceGetBusType == NULL; // Older drivers: assume PCIe as before.
+    if (nvmlDeviceGetBusType) {
+      unsigned int bus_type;
+      if (nvmlDeviceGetBusType(device, &bus_type) == NVML_SUCCESS)
+        device_on_pcie_bus = bus_type == NVML_BUS_TYPE_PCIE;
+    }
+
+    if (device_on_pcie_bus && nvmlDeviceGetCurrPcieLinkGeneration) {
+      last_nvml_return_status = nvmlDeviceGetCurrPcieLinkGeneration(device, &dynamic_info->pcie_link_gen);
+      if (last_nvml_return_status == NVML_SUCCESS)
+        SET_VALID(gpuinfo_pcie_link_gen_valid, dynamic_info->valid);
+    }
+
+    if (device_on_pcie_bus && nvmlDeviceGetCurrPcieLinkWidth) {
+      last_nvml_return_status = nvmlDeviceGetCurrPcieLinkWidth(device, &dynamic_info->pcie_link_width);
+      if (last_nvml_return_status == NVML_SUCCESS)
+        SET_VALID(gpuinfo_pcie_link_width_valid, dynamic_info->valid);
+    }
+
+    if (nvmlDeviceGetPcieThroughput) {
+      last_nvml_return_status = nvmlDeviceGetPcieThroughput(device, NVML_PCIE_UTIL_RX_BYTES, &dynamic_info->pcie_rx);
+      if (last_nvml_return_status == NVML_SUCCESS)
+        SET_VALID(gpuinfo_pcie_rx_valid, dynamic_info->valid);
+
+      last_nvml_return_status = nvmlDeviceGetPcieThroughput(device, NVML_PCIE_UTIL_TX_BYTES, &dynamic_info->pcie_tx);
+      if (last_nvml_return_status == NVML_SUCCESS)
+        SET_VALID(gpuinfo_pcie_tx_valid, dynamic_info->valid);
+    }
+  }
+
+  if (nvmlDeviceGetTemperature) {
+    last_nvml_return_status = nvmlDeviceGetTemperature(device, NVML_TEMPERATURE_GPU, &dynamic_info->gpu_temp);
+    if (last_nvml_return_status == NVML_SUCCESS && dynamic_info->gpu_temp != UINT_MAX)
+      SET_VALID(gpuinfo_gpu_temp_valid, dynamic_info->valid);
+  }
+  if (nvmlDeviceGetPowerUsage) {
+    last_nvml_return_status = nvmlDeviceGetPowerUsage(device, &dynamic_info->power_draw);
+    if (last_nvml_return_status == NVML_SUCCESS && dynamic_info->power_draw != UINT_MAX)
+      SET_VALID(gpuinfo_power_draw_valid, dynamic_info->valid);
+  }
+  if (nvmlDeviceGetEnforcedPowerLimit) {
+    last_nvml_return_status = nvmlDeviceGetEnforcedPowerLimit(device, &dynamic_info->power_draw_max);
+    if (last_nvml_return_status == NVML_SUCCESS && dynamic_info->power_draw_max != UINT_MAX)
+      SET_VALID(gpuinfo_power_draw_max_valid, dynamic_info->valid);
+  }
+
+  // MIG mode
+  if (nvmlDeviceGetMigMode) {
+    unsigned currentMode, pendingMode;
+    last_nvml_return_status = nvmlDeviceGetMigMode(device, &currentMode, &pendingMode);
+    if (last_nvml_return_status == NVML_SUCCESS) {
+      SET_GPUINFO_DYNAMIC(dynamic_info, multi_instance_mode, currentMode == NVML_DEVICE_MIG_ENABLE);
+    }
+  }
+
+  // NVLink: refresh error counters, throughput, and populate cached nvlink_info
+  // GPUs are non-hot-swappable — all NVLink probing/computation happens here
+  // (refresh path), and nvtop_get_nvlink_info() just returns the cached copy
+  // in the draw path.
+  // "supported but no bridge" case: version is probed before link state, so
+  // cached_version > 0 means NVLink hardware exists even with linkCount == 0.
+  if (bettertop_diagnostics_enabled && nvmlDeviceGetNvLinkState) {
+    unsigned int linkCount = nvlink_probe_and_cache(gpu_info);
+    if (linkCount > 0 || gpu_info->nvlink_cached_version > 0) {
+      // Throughput + cached info struct (handles 0-link case for display)
+      nvlink_refresh_cached_info(gpu_info, linkCount);
+    }
+  }
+}
+
+static void gpuinfo_nvidia_get_process_utilization(struct gpu_info_nvidia *gpu_info, unsigned num_processes_recovered,
+                                                   struct gpu_process processes[num_processes_recovered]) {
+  nvmlDevice_t device = gpu_info->gpuhandle;
+
+  if (num_processes_recovered && nvmlDeviceGetProcessUtilization) {
+    unsigned samples_count = 0;
+    nvmlReturn_t retval =
+        nvmlDeviceGetProcessUtilization(device, NULL, &samples_count, gpu_info->last_utilization_timestamp);
+    if (retval != NVML_ERROR_INSUFFICIENT_SIZE)
+      return;
+    if (samples_count > BETTERTOP_MAX_GPU_PROCESS_ROWS)
+      return;
+    nvmlProcessUtilizationSample_t *samples = malloc(samples_count * sizeof(*samples));
+    if (!samples)
+      return;
+    retval = nvmlDeviceGetProcessUtilization(device, samples, &samples_count, gpu_info->last_utilization_timestamp);
+    if (retval != NVML_SUCCESS) {
+      free(samples);
+      return;
+    }
+    unsigned long long newest_timestamp_candidate = gpu_info->last_utilization_timestamp;
+    for (unsigned i = 0; i < samples_count; ++i) {
+      bool process_matched = false;
+      for (unsigned j = 0; !process_matched && j < num_processes_recovered; ++j) {
+        // Filter out samples due to inconsistency in the results returned by
+        // the function nvmlDeviceGetProcessUtilization (see bug #110 on
+        // Github). Check for a valid running process returned by
+        // nvmlDeviceGetComputeRunningProcesses or
+        // nvmlDeviceGetGraphicsRunningProcesses, filter out inconsistent
+        // utilization value greater than 100% and filter out timestamp results
+        // that are less recent than what we were asking for
+        if ((pid_t)samples[i].pid == processes[j].pid && samples[i].smUtil <= 100 &&
+            samples[i].timeStamp > gpu_info->last_utilization_timestamp) {
+          // Collect the largest valid timestamp for this device to filter out
+          // the samples during the next call to the function
+          // nvmlDeviceGetProcessUtilization
+          if (samples[i].timeStamp > newest_timestamp_candidate)
+            newest_timestamp_candidate = samples[i].timeStamp;
+
+          SET_GPUINFO_PROCESS(&processes[j], gpu_usage, samples[i].smUtil);
+          if (samples[i].encUtil <= 100)
+            SET_GPUINFO_PROCESS(&processes[j], encode_usage, samples[i].encUtil);
+          if (samples[i].decUtil <= 100)
+            SET_GPUINFO_PROCESS(&processes[j], decode_usage, samples[i].decUtil);
+          process_matched = true;
+        }
+      }
+    }
+    gpu_info->last_utilization_timestamp = newest_timestamp_candidate;
+    free(samples);
+  }
+}
+
+static void gpuinfo_nvidia_get_running_processes(struct gpu_info *_gpu_info) {
+  struct gpu_info_nvidia *gpu_info = container_of(_gpu_info, struct gpu_info_nvidia, base);
+  nvmlDevice_t device = gpu_info->gpuhandle;
+  bool validProcessGathering = false;
+  gpu_info->processes_truncated = false;
+  for (unsigned version = 3; !validProcessGathering && version > 0; version--) {
+    // Get the size of the actual function being used
+    size_t sizeof_nvmlProcessInfo;
+    switch (version) {
+    case 3:
+      sizeof_nvmlProcessInfo = sizeof(nvmlProcessInfo_v3_t);
+      break;
+    case 2:
+      sizeof_nvmlProcessInfo = sizeof(nvmlProcessInfo_v2_t);
+      break;
+    default:
+      sizeof_nvmlProcessInfo = sizeof(nvmlProcessInfo_v1_t);
+      break;
+    }
+
+    _gpu_info->processes_count = 0;
+    unsigned graphical_count = 0, compute_count = 0, recovered_count;
+    if (!ensure_process_info_capacity(process_info_array_size, sizeof_nvmlProcessInfo)) {
+      gpu_info->processes_truncated = true;
+      return;
+    }
+    if (nvmlDeviceGetGraphicsRunningProcesses[version]) {
+    retry_query_graphical:
+      recovered_count = process_info_array_size;
+      last_nvml_return_status =
+          nvmlDeviceGetGraphicsRunningProcesses[version](device, &recovered_count, process_info_buffer);
+      if (last_nvml_return_status == NVML_ERROR_INSUFFICIENT_SIZE) {
+        if (process_info_array_size >= BETTERTOP_MAX_GPU_PROCESS_ROWS) {
+          gpu_info->processes_truncated = true;
+          continue;
+        }
+        process_info_array_size += COMMON_PROCESS_LINEAR_REALLOC_INC;
+        if (process_info_array_size > BETTERTOP_MAX_GPU_PROCESS_ROWS)
+          process_info_array_size = BETTERTOP_MAX_GPU_PROCESS_ROWS;
+        if (!ensure_process_info_capacity(process_info_array_size, sizeof_nvmlProcessInfo)) {
+          gpu_info->processes_truncated = true;
+          return;
+        }
+        goto retry_query_graphical;
+      }
+      if (last_nvml_return_status == NVML_SUCCESS) {
+        validProcessGathering = true;
+        graphical_count = recovered_count;
+      }
+    }
+
+    if (nvmlDeviceGetComputeRunningProcesses[version]) {
+    retry_query_compute:
+      recovered_count = process_info_array_size - graphical_count;
+      last_nvml_return_status = nvmlDeviceGetComputeRunningProcesses[version](
+          device, &recovered_count,
+          process_info_buffer ? process_info_buffer + graphical_count * sizeof_nvmlProcessInfo : NULL);
+      if (last_nvml_return_status == NVML_ERROR_INSUFFICIENT_SIZE) {
+        if (process_info_array_size >= BETTERTOP_MAX_GPU_PROCESS_ROWS) {
+          gpu_info->processes_truncated = true;
+          goto process_query_version_done;
+        }
+        process_info_array_size += COMMON_PROCESS_LINEAR_REALLOC_INC;
+        if (process_info_array_size > BETTERTOP_MAX_GPU_PROCESS_ROWS)
+          process_info_array_size = BETTERTOP_MAX_GPU_PROCESS_ROWS;
+        if (!ensure_process_info_capacity(process_info_array_size, sizeof_nvmlProcessInfo)) {
+          gpu_info->processes_truncated = true;
+          goto process_query_version_done;
+        }
+        goto retry_query_compute;
+      }
+      if (last_nvml_return_status == NVML_SUCCESS) {
+        validProcessGathering = true;
+        compute_count = recovered_count;
+      }
+    }
+
+    if (nvmlDeviceGetMPSComputeRunningProcesses[version]) {
+    retry_query_compute_MPS:
+      recovered_count = process_info_array_size - graphical_count - compute_count;
+      last_nvml_return_status = nvmlDeviceGetMPSComputeRunningProcesses[version](
+          device, &recovered_count,
+          process_info_buffer ? process_info_buffer + (graphical_count + compute_count) * sizeof_nvmlProcessInfo : NULL);
+      if (last_nvml_return_status == NVML_ERROR_INSUFFICIENT_SIZE) {
+        if (process_info_array_size >= BETTERTOP_MAX_GPU_PROCESS_ROWS) {
+          gpu_info->processes_truncated = true;
+          goto process_query_version_done;
+        }
+        process_info_array_size += COMMON_PROCESS_LINEAR_REALLOC_INC;
+        if (process_info_array_size > BETTERTOP_MAX_GPU_PROCESS_ROWS)
+          process_info_array_size = BETTERTOP_MAX_GPU_PROCESS_ROWS;
+        if (!ensure_process_info_capacity(process_info_array_size, sizeof_nvmlProcessInfo)) {
+          gpu_info->processes_truncated = true;
+          goto process_query_version_done;
+        }
+        goto retry_query_compute_MPS;
+      }
+      if (last_nvml_return_status == NVML_SUCCESS) {
+        validProcessGathering = true;
+        compute_count += recovered_count;
+      }
+    }
+
+  process_query_version_done:
+    if (!validProcessGathering)
+      continue;
+
+    _gpu_info->processes_count = graphical_count + compute_count;
+    if (_gpu_info->processes_count > 0) {
+      if (_gpu_info->processes_count > _gpu_info->processes_array_size) {
+        _gpu_info->processes_array_size = _gpu_info->processes_count;
+        _gpu_info->processes =
+            reallocarray(_gpu_info->processes, _gpu_info->processes_array_size, sizeof(*_gpu_info->processes));
+        if (!_gpu_info->processes) {
+          perror("Could not allocate memory: ");
+          exit(EXIT_FAILURE);
+        }
+      }
+      memset(_gpu_info->processes, 0, _gpu_info->processes_count * sizeof(*_gpu_info->processes));
+      for (unsigned i = 0; i < graphical_count + compute_count; ++i) {
+        if (i < graphical_count)
+          _gpu_info->processes[i].type = gpu_process_graphical;
+        else
+          _gpu_info->processes[i].type = gpu_process_compute;
+        switch (version) {
+        case 2: {
+          nvmlProcessInfo_v2_t *pinfo = (nvmlProcessInfo_v2_t *)process_info_buffer;
+          _gpu_info->processes[i].pid = pinfo[i].pid;
+          if (pinfo[i].usedGpuMemory != ULLONG_MAX) {
+            _gpu_info->processes[i].gpu_memory_usage = pinfo[i].usedGpuMemory;
+            SET_VALID(gpuinfo_process_gpu_memory_usage_valid, _gpu_info->processes[i].valid);
+          }
+        } break;
+        case 3: {
+          nvmlProcessInfo_v3_t *pinfo = (nvmlProcessInfo_v3_t *)process_info_buffer;
+          _gpu_info->processes[i].pid = pinfo[i].pid;
+          if (pinfo[i].usedGpuMemory != ULLONG_MAX) {
+            _gpu_info->processes[i].gpu_memory_usage = pinfo[i].usedGpuMemory;
+            SET_VALID(gpuinfo_process_gpu_memory_usage_valid, _gpu_info->processes[i].valid);
+          }
+        } break;
+        default: {
+          nvmlProcessInfo_v1_t *pinfo = (nvmlProcessInfo_v1_t *)process_info_buffer;
+          _gpu_info->processes[i].pid = pinfo[i].pid;
+          if (pinfo[i].usedGpuMemory != ULLONG_MAX) {
+            _gpu_info->processes[i].gpu_memory_usage = pinfo[i].usedGpuMemory;
+            SET_VALID(gpuinfo_process_gpu_memory_usage_valid, _gpu_info->processes[i].valid);
+          }
+        } break;
+        }
+      }
+    }
+  }
+  // If the GPU is in MIG mode; process utilization is not supported
+  if (!(IS_VALID(gpuinfo_multi_instance_mode_valid, gpu_info->base.dynamic_info.valid) &&
+        gpu_info->base.dynamic_info.multi_instance_mode))
+    gpuinfo_nvidia_get_process_utilization(gpu_info, _gpu_info->processes_count, _gpu_info->processes);
+}
+
+// NVML NVLink enums (guarded — nvml.h defines these; local fallback for older drivers)
+#ifndef NVML_NVLINK_MAX_LINKS_INTERNAL
+#define NVML_NVLINK_MAX_LINKS_INTERNAL 36
+#endif
+
+// Probe NVLink link count and version, caching results in gpu_info_nvidia to avoid
+// repeated NVML API calls on every refresh cycle. linkCount and version are static
+// hardware properties — once discovered, they never change during the process lifetime.
+// Returns the cached linkCount (0 if no NVLink).
+unsigned nvlink_probe_and_cache(struct gpu_info_nvidia *gpu_info) {
+  // Already probed — return cached result (even if linkcount is 0)
+  if (gpu_info->nvlink_probed)
+    return gpu_info->nvlink_cached_linkcount;
+
+  if (!nvmlDeviceGetNvLinkState) {
+    gpu_info->nvlink_probed = true;
+    return 0;
+  }
+
+  nvmlDevice_t device = gpu_info->gpuhandle;
+  unsigned int linkCount = 0;
+  unsigned int version = 0;
+
+  // Probe NVLink version BEFORE the link state loop. This succeeds on any GPU
+  // with NVLink hardware, even when no bridge is connected (all links return
+  // NVML_ERROR_NOT_SUPPORTED from GetNvLinkState). This lets us detect
+  // "NVLink supported but no active links" vs "no NVLink hardware at all."
+  if (nvmlDeviceGetNvLinkVersion) {
+    nvmlReturn_t vret = nvmlDeviceGetNvLinkVersion(device, 0, &version);
+    if (vret == NVML_SUCCESS)
+      version = nvlink_marketing_version(version);
+  }
+
+  // Probe links. A link is counted only if nvmlDeviceGetNvLinkState succeeds
+  // AND isActive == 1. Without a bridge, the API returns SUCCESS with isActive=0
+  // for all physical link slots — those must NOT be counted.
+  // Consume links must be contiguous from 0: we stop at the first inactive link
+  // (either isActive=0 or API error) to avoid reporting phantom counts.
+  for (unsigned int link = 0; link < NVML_NVLINK_MAX_LINKS_INTERNAL; link++) {
+    unsigned int isActive = 0;
+    nvmlReturn_t ret = nvmlDeviceGetNvLinkState(device, link, &isActive);
+    if (ret == NVML_SUCCESS && isActive) {
+      linkCount = link + 1;
+    } else if (ret == NVML_ERROR_NOT_SUPPORTED) {
+      // This link slot does not exist on this hardware — stop probing.
+      break;
+    } else {
+      // ret != SUCCESS, or isActive == 0: no more active links.
+      break;
+    }
+  }
+  // Cache results
+  gpu_info->nvlink_probed = true;
+  gpu_info->nvlink_cached_linkcount = linkCount;
+  gpu_info->nvlink_cached_version = version;
+  return linkCount;
+}
+
+// Public getter for display-ready flit CRC / CRC data / ECC counts from a struct gpu_info.
+// Returns true if baseline has been established at least once.
+bool nvtop_get_nvlink_error_counts(struct gpu_info *_gpu_info, unsigned long long *out_errors,
+                                   unsigned long long *out_corrections, unsigned long long *out_ecc) {
+  // NVLink is an NVIDIA-only technology — skip non-NVIDIA GPUs immediately
+  if (strcmp(_gpu_info->vendor->name, "NVIDIA"))
+    return false;
+
+  struct gpu_info_nvidia *gpu_info = container_of(_gpu_info, struct gpu_info_nvidia, base);
+  if (!gpu_info->baseline_errors_read && !gpu_info->baseline_corrections_read && !gpu_info->baseline_ecc_errors_read) {
+    return false;
+  }
+  *out_errors = gpu_info->display_errors;
+  *out_corrections = gpu_info->display_corrections;
+  *out_ecc = gpu_info->display_ecc_errors;
+  return true;
+}
+
+// Remap raw NVML NVLink protocol version to the marketing version.
+// NVML raw values do NOT equal marketing versions (raw 5 = 3.1 -> rounds to 3).
+static unsigned int nvlink_marketing_version(unsigned int raw_version) {
+  // Raw NVML value to rounded marketing major version.
+  switch (raw_version) {
+  case 1:
+    return 1;
+  case 2:
+    return 2;
+  case 3:
+    return 2; // NVLink 2.2 -> 2
+  case 4:
+    return 3; // NVLink 3.0 -> 3
+  case 5:
+    return 3; // NVLink 3.1 -> 3
+  case 6:
+    return 4; // NVLink 4.0
+  case 7:
+    return 5; // NVLink 5.0
+  case 8:
+    return 6; // NVLink 6.0 (Rubin)
+  default:
+    return raw_version;
+  }
+}
+
+// Get NVLink info (version, link count, aggregate throughput via NVML API).
+// Populate cached_nvlink_info with link count, version, throughput, and
+// flit CRC / CRC data / ECC counts.
+// Called from refresh_dynamic_info on every refresh cycle (refresh path).
+// GPUs are non-hot-swappable, so all NVLink data is computed here and cached —
+// nvtop_get_nvlink_info() in the draw path just returns the cached copy.
+static void nvlink_refresh_cached_info(struct gpu_info_nvidia *gpu_info, unsigned int linkCount) {
+  struct nvlink_info *cache = &gpu_info->cached_nvlink_info;
+
+  cache->supported = true;
+  cache->num_links = linkCount;
+  cache->version = gpu_info->nvlink_cached_version;
+
+  // Throughput: skip entirely when there are 0 links (nothing to measure).
+  if (linkCount == 0) {
+    cache->has_throughput = false;
+    cache->aggregate_tx = 0;
+    cache->aggregate_rx = 0;
+    cache->total_errors = 0;
+    cache->total_corrections = 0;
+    cache->total_ecc_errors = 0;
+    gpu_info->cached_nvlink_info_populated = true;
+    return;
+  }
+
+  // Throughput, CRC errors and ECC errors via NVML API in a single batched call.
+  // DATA fields (138/139) report payload throughput (data only); RAW fields
+  // (140/141) would include protocol overhead. scopeId=UINT_MAX aggregates
+  // across all links, as documented for these throughput fields.
+  // CRC error fields (38 = flit, 45 = data) are per-link (all lanes of one link,
+  // selected by scopeId), so each is queried once per active link and summed for
+  // the per-device total. Field 160 (ECC) is already a per-device all-links aggregate.
+  // A single batched NVML call runs on every refresh; the delta to the previous
+  // poll yields the per-second rate regardless of the refresh interval.
+  nvtop_time current_time;
+  nvtop_get_current_time(&current_time);
+  double delta_s =
+      (gpu_info->nvlink_last_poll_time.tv_sec > 0) ? nvtop_difftime(gpu_info->nvlink_last_poll_time, current_time) : 0;
+
+  // Single batched nvmlDeviceGetFieldValues call for TX, RX, per-link flit/data
+  // CRC errors, and ECC errors. Each entry's nvmlReturn field is checked
+  // individually for validity.
+  nvmlFieldValue_t batch[2 * linkCount + 3];
+  memset(batch, 0, sizeof(batch));
+  batch[0].fieldId = NVML_FI_DEV_NVLINK_THROUGHPUT_DATA_TX;
+  batch[0].scopeId = UINT_MAX;
+  batch[1].fieldId = NVML_FI_DEV_NVLINK_THROUGHPUT_DATA_RX;
+  batch[1].scopeId = UINT_MAX;
+  for (unsigned int link = 0; link < linkCount; link++) {
+    batch[2 + 2 * link].fieldId = NVML_FI_DEV_NVLINK_CRC_FLIT_ERROR_COUNT_TOTAL;
+    batch[2 + 2 * link].scopeId = link;
+    batch[3 + 2 * link].fieldId = NVML_FI_DEV_NVLINK_CRC_DATA_ERROR_COUNT_TOTAL;
+    batch[3 + 2 * link].scopeId = link;
+  }
+  batch[2 + 2 * linkCount].fieldId = NVML_FI_DEV_NVLINK_ECC_DATA_ERROR_COUNT_TOTAL;
+  batch[2 + 2 * linkCount].scopeId = 0;
+
+  unsigned long long new_tx = 0, new_rx = 0, new_flit_errors = 0, new_data_crc_errors = 0, new_ecc_errors = 0;
+  bool got_tx = false, got_rx = false, got_flit_errors = false, got_data_crc_errors = false, got_ecc_errors = false;
+
+  if (nvmlDeviceGetFieldValues) {
+    nvmlReturn_t ret = nvmlDeviceGetFieldValues(gpu_info->gpuhandle, 2 * linkCount + 3, batch);
+    if (ret == NVML_SUCCESS) {
+      if (batch[0].nvmlReturn == NVML_SUCCESS) {
+        new_tx = batch[0].value.ullVal;
+        got_tx = true;
+      }
+      if (batch[1].nvmlReturn == NVML_SUCCESS) {
+        new_rx = batch[1].value.ullVal;
+        got_rx = true;
+      }
+      // Sum the per-link CRC error totals. Only report a per-device total when
+      // every active link answered, to avoid presenting a partial count.
+      unsigned int flit_read = 0, crc_data_read = 0;
+      for (unsigned int link = 0; link < linkCount; link++) {
+        if (batch[2 + 2 * link].nvmlReturn == NVML_SUCCESS) {
+          new_flit_errors += batch[2 + 2 * link].value.ullVal;
+          flit_read++;
+        }
+        if (batch[3 + 2 * link].nvmlReturn == NVML_SUCCESS) {
+          new_data_crc_errors += batch[3 + 2 * link].value.ullVal;
+          crc_data_read++;
+        }
+      }
+      got_flit_errors = flit_read == linkCount;
+      got_data_crc_errors = crc_data_read == linkCount;
+      if (batch[2 + 2 * linkCount].nvmlReturn == NVML_SUCCESS) {
+        new_ecc_errors = batch[2 + 2 * linkCount].value.ullVal;
+        got_ecc_errors = true;
+      }
+    }
+  }
+
+  // Throughput delta computation (TX + RX)
+  if (got_tx || got_rx) {
+    if (gpu_info->nvlink_last_poll_time.tv_sec > 0 && delta_s > 0) {
+      unsigned long long delta_tx = (new_tx >= gpu_info->nvlink_last_tx) ? new_tx - gpu_info->nvlink_last_tx : 0;
+      unsigned long long delta_rx = (new_rx >= gpu_info->nvlink_last_rx) ? new_rx - gpu_info->nvlink_last_rx : 0;
+      cache->aggregate_tx = (unsigned long long)((double)delta_tx / delta_s);
+      cache->aggregate_rx = (unsigned long long)((double)delta_rx / delta_s);
+      cache->has_throughput = true;
+    } else {
+      cache->has_throughput = false;
+    }
+    gpu_info->nvlink_last_tx = new_tx;
+    gpu_info->nvlink_last_rx = new_rx;
+  } else {
+    cache->has_throughput = false;
+    cache->aggregate_tx = 0;
+    cache->aggregate_rx = 0;
+  }
+  gpu_info->nvlink_last_poll_time = current_time;
+
+  // Flit CRC errors (field 38) -- baseline subtraction shows errors since launch
+  if (got_flit_errors) {
+    if (!gpu_info->baseline_errors_read) {
+      gpu_info->baseline_errors = new_flit_errors;
+      gpu_info->display_errors = 0;
+      gpu_info->baseline_errors_read = true;
+    } else {
+      gpu_info->display_errors =
+          new_flit_errors > gpu_info->baseline_errors ? new_flit_errors - gpu_info->baseline_errors : 0;
+    }
+  }
+
+  // CRC data errors (field 45) -- same baseline subtraction pattern
+  if (got_data_crc_errors) {
+    if (!gpu_info->baseline_corrections_read) {
+      gpu_info->baseline_corrections = new_data_crc_errors;
+      gpu_info->display_corrections = 0;
+      gpu_info->baseline_corrections_read = true;
+    } else {
+      gpu_info->display_corrections = new_data_crc_errors > gpu_info->baseline_corrections
+                                          ? new_data_crc_errors - gpu_info->baseline_corrections
+                                          : 0;
+    }
+  }
+
+  // ECC data errors (field 160) -- same baseline subtraction pattern
+  if (got_ecc_errors) {
+    if (!gpu_info->baseline_ecc_errors_read) {
+      gpu_info->baseline_ecc_errors = new_ecc_errors;
+      gpu_info->display_ecc_errors = 0;
+      gpu_info->baseline_ecc_errors_read = true;
+    } else {
+      gpu_info->display_ecc_errors =
+          new_ecc_errors > gpu_info->baseline_ecc_errors ? new_ecc_errors - gpu_info->baseline_ecc_errors : 0;
+    }
+  }
+
+  // Flit CRC / CRC data / ECC counts from display-ready fields
+  cache->total_errors = gpu_info->display_errors;
+  cache->total_corrections = gpu_info->display_corrections;
+  cache->total_ecc_errors = gpu_info->display_ecc_errors;
+
+  gpu_info->cached_nvlink_info_populated = true;
+}
+
+// Return cached nvlink_info struct. Called from the draw path (draw_gpu_info_ncurses)
+// to avoid redundant NVML calls and CLI forks on every draw cycle.
+// GPUs are non-hot-swappable, so the cached struct is authoritative.
+// For the startup probe (nvtop_probe_nvlink_list) before refresh_dynamic_info has run,
+// falls back to computing on-demand.
+unsigned nvtop_get_nvlink_info(struct gpu_info *_gpu_info, struct nvlink_info *nvlink_info) {
+  if (!_gpu_info || !nvlink_info)
+    return 0;
+
+  // NVLink is an NVIDIA-only technology — skip non-NVIDIA GPUs immediately
+  if (strcmp(_gpu_info->vendor->name, "NVIDIA")) {
+    memset(nvlink_info, 0, sizeof(*nvlink_info));
+    return 0;
+  }
+
+  struct gpu_info_nvidia *gpu_info = container_of(_gpu_info, struct gpu_info_nvidia, base);
+
+  // If cached info is available (after first refresh), just return it.
+  // This is the fast path — eliminates all NVML calls and CLI forks in the draw path.
+  if (gpu_info->cached_nvlink_info_populated) {
+    memcpy(nvlink_info, &gpu_info->cached_nvlink_info, sizeof(*nvlink_info));
+    return nvlink_info->num_links;
+  }
+
+  // Fallback for startup probe (nvtop_probe_nvlink_list) before refresh_dynamic_info ran:
+  // Populate minimal info (link count + version, no throughput) to determine if NVLink exists.
+  // "supported but no bridge" case: version probed before link state, so set supported=true
+  // even when linkCount == 0 if we got a version reading.
+  if (!nvmlDeviceGetNvLinkState)
+    return 0;
+
+  memset(nvlink_info, 0, sizeof(*nvlink_info));
+
+  unsigned int linkCount = nvlink_probe_and_cache(gpu_info);
+
+  if (gpu_info->nvlink_cached_version > 0) {
+    // NVLink hardware detected (version read succeeded), even if no links active.
+    nvlink_info->supported = true;
+    nvlink_info->num_links = linkCount;
+    nvlink_info->version = gpu_info->nvlink_cached_version;
+  }
+
+  return nvlink_info->num_links;
+}
+
+// Reset all NVLink caches for a single GPU. Called when monitored device set changes.
+void nvtop_reset_nvlink_cache(struct gpu_info *_gpu_info) {
+  // NVLink is an NVIDIA-only technology — skip non-NVIDIA GPUs immediately
+  if (strcmp(_gpu_info->vendor->name, "NVIDIA"))
+    return;
+
+  struct gpu_info_nvidia *gpu_info = container_of(_gpu_info, struct gpu_info_nvidia, base);
+  gpu_info->nvlink_probed = false;
+  gpu_info->nvlink_cached_linkcount = 0;
+  gpu_info->nvlink_cached_version = 0;
+  gpu_info->cached_nvlink_info_populated = false;
+  memset(&gpu_info->cached_nvlink_info, 0, sizeof(gpu_info->cached_nvlink_info));
+  gpu_info->baseline_errors = 0;
+  gpu_info->baseline_corrections = 0;
+  gpu_info->baseline_ecc_errors = 0;
+  gpu_info->display_errors = 0;
+  gpu_info->display_corrections = 0;
+  gpu_info->display_ecc_errors = 0;
+  gpu_info->baseline_errors_read = false;
+  gpu_info->baseline_corrections_read = false;
+  gpu_info->baseline_ecc_errors_read = false;
+  gpu_info->nvlink_last_tx = 0;
+  gpu_info->nvlink_last_rx = 0;
+  gpu_info->nvlink_last_poll_time = (struct timespec){0};
+}
+
+// Memory ECC support: probe the volatile corrected ECC counter once. Consumer GPUs
+// return NVML_ERROR_NOT_SUPPORTED, so the layout can skip the ECC field entirely.
+bool nvtop_get_ecc_support(struct gpu_info *_gpu_info) {
+  // Memory ECC is an NVIDIA-specific NVML query
+  if (strcmp(_gpu_info->vendor->name, "NVIDIA"))
+    return false;
+
+  if (!nvmlDeviceGetTotalEccErrors)
+    return false;
+
+  struct gpu_info_nvidia *gpu_info = container_of(_gpu_info, struct gpu_info_nvidia, base);
+  unsigned long long ecc_count = 0;
+  nvmlReturn_t ret =
+      nvmlDeviceGetTotalEccErrors(gpu_info->gpuhandle, NVML_MEMORY_ERROR_TYPE_CORRECTED, NVML_VOLATILE_ECC, &ecc_count);
+  return ret == NVML_SUCCESS;
+}

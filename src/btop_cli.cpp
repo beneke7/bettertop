@@ -19,6 +19,7 @@
 #include <fmt/format.h>
 
 #include "btop_config.hpp"
+#include "btop_ml.hpp"
 #include "btop_shared.hpp"
 #include "config.h"
 
@@ -35,9 +36,9 @@ static constexpr auto RESET = "\033[0m"sv;
 
 static void version() noexcept {
 	if constexpr (GIT_COMMIT.empty()) {
-		fmt::println("btop version: {}{}{}", BOLD, Global::Version, RESET);
+		fmt::println("BetterTop version: {}{}{}", BOLD, Global::Version, RESET);
 	} else {
-		fmt::println("btop version: {}{}+{}{}", BOLD, Global::Version, GIT_COMMIT, RESET);
+		fmt::println("BetterTop version: {}{}+{}{}", BOLD, Global::Version, GIT_COMMIT, RESET);
 	}
 }
 
@@ -74,6 +75,14 @@ namespace Cli {
 				build_info();
 				return std::unexpected { 0 };
 			}
+			if (arg == "--check-ml-layout") {
+				if (!Ml::self_test()) {
+					error("ML layout check failed");
+					return std::unexpected { 1 };
+				}
+				fmt::println("BetterTop ML layout check passed");
+				return std::unexpected { 0 };
+			}
 
 			if (arg == "-d" || arg == "--debug") {
 				cli.debug = true;
@@ -101,6 +110,19 @@ namespace Cli {
 					return std::unexpected { 1 };
 				}
 				cli.force_tty = std::make_optional(false);
+				continue;
+			}
+			if (arg == "--classic") {
+				cli.classic = true;
+				continue;
+			}
+			if (arg.starts_with("--fun=")) {
+				auto mode = arg.substr(6);
+				if (mode != "cat" && mode != "rocket" && mode != "off") {
+					error("--fun must be cat, rocket or off");
+					return std::unexpected { 1 };
+				}
+				cli.fun_mode = std::string(mode);
 				continue;
 			}
 
@@ -243,7 +265,7 @@ namespace Cli {
 	}
 
 	void usage() noexcept {
-		fmt::println("{0}Usage:{1} {2}btop{1} [OPTIONS]\n", BOLD_UNDERLINE, RESET, BOLD);
+		fmt::println("{0}Usage:{1} {2}bettertop{1} [OPTIONS]\n", BOLD_UNDERLINE, RESET, BOLD);
 	}
 
 	void help() noexcept {
@@ -259,6 +281,9 @@ namespace Cli {
 			"  {2}    --themes-dir{1} <dir>  Path to a custom themes directory\n"
 			"  {2}    --no-tty{1}            Force disable tty mode\n"
 			"  {2}-u, --update{1} <ms>       Set an initial update rate in milliseconds\n"
+			"  {2}    --classic{1}            Start with the classic btop layout\n"
+			"  {2}    --fun=cat|rocket|off{1} Select a metric-driven footer mode\n"
+			"  {2}    --check-ml-layout{1}   Check compact layout bounds and row counts\n"
 			"  {2}    --default-config{1}    Print default config to standard output\n"
 			"  {2}-h, --help{1}              Show this help message and exit\n"
 			"  {2}-V, --version{1}           Show a version message and exit (more with --version)\n",

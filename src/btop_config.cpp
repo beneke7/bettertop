@@ -74,7 +74,7 @@ namespace Config {
 
 	const vector<array<string, 2>> descriptions = {
 		{"color_theme", 		"#* Name of a btop++/bpytop/bashtop formatted \".theme\" file, \"Default\" and \"TTY\" for builtin themes.\n"
-								"#* Themes should be placed in \"../share/btop/themes\" relative to binary or \"$HOME/.config/btop/themes\""},
+								"#* Themes should be placed in \"../share/btop/themes\" relative to binary or \"$HOME/.config/bettertop/themes\""},
 
 		{"theme_background", 	"#* If the theme set background should be shown, set to False if you want terminal background transparency."},
 
@@ -119,6 +119,11 @@ namespace Config {
 		{"graph_symbol_proc", 	"# Graph symbol to use for graphs in cpu box, \"default\", \"braille\", \"block\" or \"tty\"."},
 
 		{"shown_boxes", 		"#* Manually set which boxes to show. Available values are \"cpu mem net proc\" and \"gpu0\" through \"gpu5\", separate values with whitespace."},
+		{"ml_view", 			"#* Start in BetterTop's compact ML view; press v to switch to the classic btop layout."},
+		{"ml_gpu_only", 		"#* Show GPU-associated processes only in the compact view; press g to include every process."},
+		{"ml_sorting", 		"#* Compact-view process order: vram, gpu, cpu or ram."},
+		{"ml_fun", 			"#* Optional metric-driven footer presentation: off, cat or rocket."},
+		{"ml_gpu_start", 		"#* First GPU row on the compact page; use [ and ] to page through larger fleets."},
 
 		{"update_ms", 			"#* Update time in milliseconds, recommended 2000 ms or above for better sample times for graphs."},
 
@@ -250,13 +255,13 @@ namespace Config {
 
 		{"show_battery_watts",	"#* Show power stats of battery next to charge indicator."},
 
-		{"log_level", 			"#* Set loglevel for \"~/.local/state/btop.log\" levels are: \"ERROR\" \"WARNING\" \"INFO\" \"DEBUG\".\n"
+		{"log_level", 			"#* Set loglevel for \"~/.local/state/bettertop.log\" levels are: \"ERROR\" \"WARNING\" \"INFO\" \"DEBUG\".\n"
 								"#* The level set includes all lower levels, i.e. \"DEBUG\" will show all logging info."},
 		{"save_config_on_exit",  "#* Automatically save current settings to config file on exit."},
 	#ifdef GPU_SUPPORT
 
 		{"nvml_measure_pcie_speeds",
-								"#* Measure PCIe throughput on NVIDIA cards, may impact performance on certain cards."},
+								"#* Enable PCIe/NVLink diagnostic queries in the isolated NVIDIA helper; off by default."},
 		{"rsmi_measure_pcie_speeds",
 								"#* Measure PCIe throughput on AMD cards, may impact performance on certain cards."},
 		{"gpu_mirror_graph",	"#* Horizontally mirror the GPU graph."},
@@ -282,6 +287,8 @@ namespace Config {
 		{"graph_symbol_net", "default"},
 		{"graph_symbol_proc", "default"},
 		{"proc_sorting", "cpu lazy"},
+		{"ml_sorting", "vram"},
+		{"ml_fun", "off"},
 		{"cpu_graph_upper", "Auto"},
 		{"cpu_graph_lower", "Auto"},
 		{"cpu_sensor", "Auto"},
@@ -361,6 +368,8 @@ namespace Config {
 		{"force_tty", false},
 		{"lowcolor", false},
 		{"show_detailed", false},
+		{"ml_view", true},
+		{"ml_gpu_only", true},
 		{"proc_filtering", false},
 		{"proc_aggregate", false},
 		{"pause_proc_list", false},
@@ -371,7 +380,7 @@ namespace Config {
 		{"update_following", false},
 		{"should_selection_return_to_followed", false},
 	#ifdef GPU_SUPPORT
-		{"nvml_measure_pcie_speeds", true},
+		{"nvml_measure_pcie_speeds", false},
 		{"rsmi_measure_pcie_speeds", true},
 		{"gpu_mirror_graph", true},
 	#endif
@@ -386,6 +395,7 @@ namespace Config {
 		{"net_download", 100},
 		{"net_upload", 100},
 		{"proc_tree_auto_collapse", 0},
+		{"ml_gpu_start", 0},
 		{"detailed_pid", 0},
 		{"restore_detailed_pid", 0},
 		{"selected_pid", 0},
@@ -404,14 +414,12 @@ namespace Config {
 		fs::path config_dir;
 		{
 			std::error_code error;
-			if (const auto xdg_config_home = std::getenv("XDG_CONFIG_HOME"); xdg_config_home != nullptr) {
-				if (fs::exists(xdg_config_home, error)) {
-					config_dir = fs::path(xdg_config_home) / "btop";
-				}
+			if (const auto xdg_config_home = std::getenv("XDG_CONFIG_HOME"); xdg_config_home != nullptr && *xdg_config_home != '\0') {
+				config_dir = fs::path(xdg_config_home) / "bettertop";
 			} else if (const auto home = std::getenv("HOME"); home != nullptr) {
 				error.clear();
 				if (fs::exists(home, error)) {
-					config_dir = fs::path(home) / ".config" / "btop";
+					config_dir = fs::path(home) / ".config" / "bettertop";
 				}
 				if (error) {
 					fmt::print(stderr, "\033[0;31mWarning: \033[0m{} could not be accessed: {}\n", config_dir.string(), error.message());
@@ -586,6 +594,9 @@ namespace Config {
 		else if (name == "proc_tree_auto_collapse" and i_value > 10000)
 			validError = "Config value proc_tree_auto_collapse set too high (>10000).";
 
+		else if (name == "ml_gpu_start" and i_value < 0)
+			validError = "Config value ml_gpu_start must be >= 0.";
+
 		else
 			return true;
 
@@ -622,6 +633,12 @@ namespace Config {
 		else if (name == "show_gpu_info" and not v_contains(show_gpu_values, value))
 			validError = "Invalid value for show_gpu_info: " + value;
 	#endif
+
+		else if (name == "ml_sorting" and not is_in(value, "vram", "gpu", "cpu", "ram"))
+			validError = "Invalid compact-view process sort: " + value;
+
+		else if (name == "ml_fun" and not is_in(value, "off", "cat", "rocket"))
+			validError = "Invalid BetterTop fun mode: " + value;
 
 		else if (name == "presets" and not presetsValid(value))
 			return false;
@@ -849,7 +866,7 @@ namespace Config {
 
 		{
 			const auto* xdg_state_home_ptr = std::getenv("XDG_STATE_HOME");
-			if (xdg_state_home_ptr != nullptr) {
+			if (xdg_state_home_ptr != nullptr && *xdg_state_home_ptr != '\0') {
 				xdg_state_home = std::make_optional(fs::path(xdg_state_home_ptr));
 			} else {
 				const auto* home_ptr = std::getenv("HOME");
@@ -871,12 +888,12 @@ namespace Config {
 	}
 
 	auto get_log_file() -> std::optional<fs::path> {
-		return get_xdg_state_dir().transform([](auto&& state_home) -> auto { return state_home / "btop.log"; });
+		return get_xdg_state_dir().transform([](auto&& state_home) -> auto { return state_home / "bettertop.log"; });
 	}
 
 	auto current_config() -> std::string {
 		auto buffer = std::string {};
-		fmt::format_to(std::back_inserter(buffer), "#? Config file for btop v.{}\n", Global::Version);
+		fmt::format_to(std::back_inserter(buffer), "#? Config file for BetterTop v.{}\n", Global::Version);
 
 		for (const auto& [name, description] : descriptions) {
 			// Write a description comment if available.

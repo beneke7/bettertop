@@ -111,6 +111,11 @@ namespace Shared {
 #if defined(GPU_SUPPORT)
 
 namespace Gpu {
+	enum class SnapshotState { starting, healthy, stale, unavailable, disabled };
+	extern SnapshotState snapshot_state;
+	extern uint64_t snapshot_age_ms;
+	extern string status_detail;
+
 	extern vector<string> box;
 	extern int width, total_height, min_width, min_height;
 	extern vector<int> x_vec, y_vec;
@@ -126,11 +131,15 @@ namespace Gpu {
 
 	extern const array<string, 2> mem_names;
 
-	//* Container for process information // TODO
-	/*struct proc_info {
-    unsigned int pid;
-    unsigned long long mem;
-	};*/
+	struct process_info {
+		size_t pid{};
+		vector<unsigned> device_indices;
+		std::optional<uint64_t> mem_used;
+		std::optional<unsigned> util_percent;
+		bool compute{};
+		bool graphics{};
+	};
+	extern vector<process_info> gpu_processes;
 
 	//* Container for supported Gpu::*::collect() functions
 	struct gpu_info_supported {
@@ -145,7 +154,8 @@ namespace Gpu {
 				 mem_used = true,
 				 pcie_txrx = true,
 				 encoder_utilization = true,
-				 decoder_utilization = true;
+				 decoder_utilization = true,
+				 pwr_limit = false;
 	};
 
 	//* Per-device container for GPU info
@@ -155,11 +165,11 @@ namespace Gpu {
 			{"gpu-vram-totals", {}},
 			{"gpu-pwr-totals", {}},
 		};
-		unsigned int gpu_clock_speed; // MHz
+		unsigned int gpu_clock_speed{}; // MHz
 
-		long long pwr_usage; // mW
+		long long pwr_usage{}; // mW
 		long long pwr_max_usage = 255000;
-		long long pwr_state;
+		long long pwr_state{};
 
 		deque<long long> temp = {0};
 		long long temp_max = 110;
@@ -176,14 +186,10 @@ namespace Gpu {
 		long long decoder_utilization = 0;
 
 		gpu_info_supported supported_functions;
-
-		// vector<proc_info> graphics_processes = {}; // TODO
-		// vector<proc_info> compute_processes = {};
+		string device_id;
+		string pci_bus_id;
 	};
 
-	namespace Nvml {
-		extern bool shutdown();
-	}
 	namespace Rsmi {
 		extern bool shutdown();
 	}

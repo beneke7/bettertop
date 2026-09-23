@@ -217,7 +217,7 @@ namespace Menu {
 		{"Selected N", "Select new nice value for selected process."},
 		{"", " "},
 		{"", "For bug reporting and project updates, visit:"},
-		{"", "https://github.com/aristocratos/btop"},
+		{"", "https://github.com/beneke7/bettertop"},
 	};
 
 	const vector<vector<vector<string>>> categories = {
@@ -577,9 +577,9 @@ namespace Menu {
 	#ifdef GPU_SUPPORT
 		{
 			{"nvml_measure_pcie_speeds",
-				"Measure PCIe throughput on NVIDIA cards.",
+				"Enable PCIe/NVLink diagnostic queries in the NVIDIA helper.",
 				"",
-				"May impact performance on certain cards.",
+				"Disabled by default; these driver calls can block.",
 				"",
 				"True or False."},
 			{"rsmi_measure_pcie_speeds",

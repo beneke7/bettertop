@@ -6,6 +6,7 @@
 #include <expected>
 #include <filesystem>
 #include <optional>
+#include <string>
 #include <span>
 #include <string_view>
 
@@ -32,6 +33,10 @@ namespace Cli {
 		std::optional<stdfs::path> themes_dir;
 		// The initial refresh rate
 		std::optional<std::uint32_t> updates;
+		// Start in the classic btop layout instead of BetterTop's compact view
+		bool classic {};
+		// Select a metric-driven footer presentation
+		std::optional<std::string> fun_mode;
 	};
 
 	using Result = std::expected<Cli, std::int32_t>;

@@ -17,17 +17,20 @@ tab-size = 4
 */
 
 #include <cmath>
+#include <cerrno>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <mutex>
 #include <sstream>
 #include <string_view>
 #include <utility>
 #include <cstdlib>
 
 #include <fcntl.h>
+#include <signal.h>
 #include <sys/ioctl.h>
 #include <termios.h>
 #include <unistd.h>
@@ -60,31 +63,35 @@ namespace Term {
 	string current_tty;
 
 	namespace {
-		struct termios initial_settings;
+		struct termios initial_settings{};
+		bool initial_settings_valid{};
+		std::mutex output_mutex;
+		volatile sig_atomic_t termios_changed{};
+		volatile sig_atomic_t escape_modes_started{};
+		constexpr char restore_bytes[] = "\x1b[?2026l\x1b[?1002l\x1b[?1015l\x1b[?1006l\x1b[?1003l\x1b[0m\x1b[?1049l\x1b[?25h";
 
-		//* Toggle terminal input echo
-		bool echo(bool on=true) {
-			struct termios settings;
-			if (tcgetattr(STDIN_FILENO, &settings)) return false;
-			if (on) settings.c_lflag |= ECHO;
-			else settings.c_lflag &= ~(ECHO);
-			return 0 == tcsetattr(STDIN_FILENO, TCSANOW, &settings);
+		void write_all(const int fd, const char* data, size_t size) noexcept {
+			while (size > 0) {
+				const auto written = ::write(fd, data, size);
+				if (written > 0) {
+					data += written;
+					size -= static_cast<size_t>(written);
+				}
+				else if (written < 0 and errno == EINTR) continue;
+				else break;
+			}
 		}
 
-		//* Toggle need for return key when reading input
-		bool linebuffered(bool on=true) {
-			struct termios settings;
-			if (tcgetattr(STDIN_FILENO, &settings)) return false;
-			if (on) settings.c_lflag |= ICANON;
-			else {
-				settings.c_lflag &= ~(ICANON);
-				settings.c_cc[VMIN] = 0;
-				settings.c_cc[VTIME] = 0;
+		void restore_state(const bool update_initialized) noexcept {
+			if (escape_modes_started) {
+				write_all(STDOUT_FILENO, restore_bytes, sizeof(restore_bytes) - 1);
+				escape_modes_started = 0;
 			}
-			if (tcsetattr(STDIN_FILENO, TCSANOW, &settings)) return false;
-			if (on) setlinebuf(stdin);
-			else setbuf(stdin, nullptr);
-			return true;
+			if (termios_changed and initial_settings_valid) {
+				tcsetattr(STDIN_FILENO, TCSANOW, &initial_settings);
+				termios_changed = 0;
+			}
+			if (update_initialized) initialized = false;
 		}
 	}
 
@@ -149,9 +156,13 @@ namespace Term {
 
 	bool init() {
 		if (not initialized) {
-			initialized = (bool)isatty(STDIN_FILENO);
-			if (initialized) {
-				tcgetattr(STDIN_FILENO, &initial_settings);
+			if (not isatty(STDIN_FILENO)) return false;
+			if (not initial_settings_valid) {
+				if (tcgetattr(STDIN_FILENO, &initial_settings) != 0) return false;
+				initial_settings_valid = true;
+			}
+
+			{
 				current_tty = (ttyname(STDIN_FILENO) != nullptr ? static_cast<string>(ttyname(STDIN_FILENO)) : "unknown");
 
 				//? Disable stream sync - this does not seem to work on OpenBSD
@@ -161,11 +172,18 @@ namespace Term {
 
 				//? Disable stream ties
 				cout.tie(nullptr);
-				echo(false);
-				linebuffered(false);
+				struct termios settings = initial_settings;
+				settings.c_lflag &= ~(ECHO | ICANON);
+				settings.c_cc[VMIN] = 0;
+				settings.c_cc[VTIME] = 0;
+				termios_changed = 1;
+				if (tcsetattr(STDIN_FILENO, TCSANOW, &settings) != 0) return false;
+				setbuf(stdin, nullptr);
 				refresh();
 
 				const auto is_mouse_enabled = !Config::getB("disable_mouse");
+				initialized = true;
+				escape_modes_started = 1;
 				cout << alt_screen << hide_cursor << (is_mouse_enabled ? mouse_on : mouse_off) << flush;
 				Global::resized = false;
 			}
@@ -173,12 +191,23 @@ namespace Term {
 		return initialized;
 	}
 
-	void restore() {
-		if (initialized) {
-			tcsetattr(STDIN_FILENO, TCSANOW, &initial_settings);
-			cout << mouse_off << clear << Fx::reset << normal_screen << show_cursor << flush;
-			initialized = false;
+	void output(const std::string_view text) {
+		std::lock_guard lock(output_mutex);
+		if (initialized) cout.write(text.data(), static_cast<std::streamsize>(text.size())) << flush;
+	}
+
+	bool restore() {
+		std::unique_lock lock(output_mutex, std::try_to_lock);
+		if (not lock.owns_lock()) {
+			emergency_restore();
+			return false;
 		}
+		restore_state(true);
+		return true;
+	}
+
+	void emergency_restore() noexcept {
+		restore_state(false);
 	}
 }
 
@@ -280,10 +309,10 @@ namespace Tools {
 
 			while (wide_ulen(w_str) > len) w_str.pop_back();
 
-			string n_str;
-			n_str.resize(w_str.size());
-			std::wcstombs(&n_str[0], &w_str[0], w_str.size());
-
+			const size_t bytes = std::wcstombs(nullptr, w_str.data(), 0);
+			if (bytes == static_cast<size_t>(-1)) return str;
+			string n_str(bytes, '\0');
+			std::wcstombs(n_str.data(), w_str.data(), bytes);
 			return n_str;
 		}
 		else {

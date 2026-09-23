@@ -1,3 +1,77 @@
+# BetterTop
+
+BetterTop combines btop's host and process monitor with nvtop's NVIDIA GPU
+metrics in a compact dashboard for machine learning workstations. The NVIDIA
+collector runs in a separate `bettertop-gpu` process, so a stalled driver call
+does not block the host metrics or terminal controls.
+
+The default screen shows CPU, RAM, swap, disk and network activity, the GPU
+fleet, and host processes joined with GPU process memory by PID. Press `v` for
+the classic btop layout, `g` to switch between GPU-only and all processes,
+`x` to cycle the optional cat/rocket footer, and `q` to quit. The playful modes
+are off by default; `--fun=cat` and `--fun=rocket` enable one at startup.
+
+## Download
+
+Download the Linux x86_64 archive from [Releases](../../releases/latest), unpack
+it, and run `bin/bettertop`. Keep `bin/bettertop-gpu` beside it. The GPU view
+reports unavailable status when NVIDIA's driver library is missing. PCIe and
+NVLink diagnostics are excluded from the safe default profile.
+
+```sh
+tar -xzf bettertop-*-linux-x86_64.tar.gz
+./bettertop-*/bin/bettertop
+```
+
+The release archive includes the exact binary pair, themes, notices and
+licenses. Its `SHA256SUMS` file checks the archive. GitHub also provides source
+archives for each tagged release.
+
+## Build
+
+Linux builds need CMake 3.25+, a C++23 compiler, and the standard C library
+development headers. The build compiles the NVIDIA helper; CTest runs small
+layout/protocol self-checks:
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBTOP_GPU=ON
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
+```
+
+The Linux x86_64 release is built on Ubuntu 24.04 with GCC 14; the binary's
+glibc baseline is therefore 2.39. The initial release is fault-isolation
+focused. It has not been soaked on the four-GPU Blackwell workstation.
+
+## Controls
+
+| Key | Action |
+| --- | --- |
+| `v` | Switch between compact ML and classic views |
+| `g` | Toggle GPU-only and all-process views |
+| `r` | Retry the NVIDIA helper |
+| `←` / `→` | Change process sort: VRAM, GPU, CPU, RAM |
+| `[` / `]` | Page through GPU rows |
+| `x` | Cycle off, cat and rocket footer modes |
+| `q` | Quit |
+
+For command-line options, run `bettertop --help`. Use `--classic` to start in
+the original btop layout. See [THIRD_PARTY.md](THIRD_PARTY.md) for component
+licenses and upstream revisions.
+
+---
+
+The sections below retain the original btop++ documentation for platform
+collectors and configuration options. BetterTop's Linux release and compact
+view are documented above.
+
+<details>
+<summary>Original btop++ documentation</summary>
+
+<br>
+
+<!-- Original btop++ README follows. Keep its upstream licensing and attribution. -->
+
 # ![btop++](Img/logo.png)
 
 <a href="https://repology.org/project/btop/versions">
@@ -1591,3 +1665,5 @@ Options:
 ## LICENSE
 
 [Apache License 2.0](LICENSE)
+
+</details>

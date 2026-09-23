@@ -203,7 +203,6 @@ namespace Gpu {
 	vector<gpu_info> gpus;
 
 	//? Stub shutdown for backends not available on macOS
-	namespace Nvml { bool shutdown() { return false; } }
 	namespace Rsmi { bool shutdown() { return false; } }
 	namespace Asysfs { bool shutdown() { return false; } }
 

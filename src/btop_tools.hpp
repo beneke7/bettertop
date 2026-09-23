@@ -155,8 +155,13 @@ namespace Term {
 	//* Check for a valid tty, save terminal options and set new options
 	bool init();
 
+	//* Write renderer output without racing terminal restoration
+	void output(std::string_view text);
+
 	//* Restore terminal options
-	void restore();
+	bool restore();
+	//* Async-signal-safe best-effort restoration using precomputed bytes
+	void emergency_restore() noexcept;
 }
 
 //? --------------------------------------------------- FUNCTIONS -----------------------------------------------------

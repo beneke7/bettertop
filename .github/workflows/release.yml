@@ -1,0 +1,64 @@
+name: Linux build and release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  linux-x86_64:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake g++-14 gcc-14 ninja-build
+
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_COMPILER=gcc-14
+          -DCMAKE_CXX_COMPILER=g++-14
+          -DBTOP_GPU=ON
+          -DBUILD_TESTING=ON
+
+      - name: Build and check
+        run: |
+          cmake --build build --parallel
+          ctest --test-dir build --output-on-failure
+          ./build/bettertop --version
+          ./build/bettertop --check-ml-layout
+          ./build/bettertop-gpu --self-check
+
+      - name: Package and verify
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          bash scripts/package-release.sh build "$version" dist
+          (cd dist && sha256sum --check SHA256SUMS)
+          mkdir unpacked
+          tar -xzf "dist/bettertop-${version}-linux-x86_64.tar.gz" -C unpacked
+          ./unpacked/bettertop-${version}-linux-x86_64/bin/bettertop --version
+          ./unpacked/bettertop-${version}-linux-x86_64/bin/bettertop-gpu --self-check
+          python3 scripts/check-linux-terminal.py "unpacked/bettertop-${version}-linux-x86_64/bin/bettertop"
+
+      - name: Publish release assets
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/bettertop-${GITHUB_REF_NAME#v}-linux-x86_64.tar.gz" \
+            dist/SHA256SUMS \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
