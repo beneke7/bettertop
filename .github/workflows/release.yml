@@ -40,6 +40,11 @@ jobs:
           ./build/bettertop --version
           ./build/bettertop --check-ml-layout
           ./build/bettertop-gpu --self-check
+          set +e
+          timeout 10s ./build/bettertop --diagnose-gpu
+          status=$?
+          set -e
+          test "$status" -le 1
 
       - name: Package and verify
         run: |

@@ -35,6 +35,8 @@ namespace Cli {
 		std::optional<std::uint32_t> updates;
 		// Start in the classic btop layout instead of BetterTop's compact view
 		bool classic {};
+		// Run a bounded, noninteractive Linux NVIDIA worker diagnostic
+		bool diagnose_gpu {};
 		// Select a metric-driven footer presentation
 		std::optional<std::string> fun_mode;
 	};

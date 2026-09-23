@@ -46,6 +46,9 @@ tab-size = 4
 #include <semaphore>
 #include <signal.h>
 #include <time.h>
+#if defined(__linux__)
+	#include <sys/utsname.h>
+#endif
 
 #ifdef __APPLE__
 	#include <CoreFoundation/CoreFoundation.h>
@@ -72,6 +75,9 @@ tab-size = 4
 #include "btop_shared.hpp"
 #include "btop_theme.hpp"
 #include "btop_tools.hpp"
+#if defined(__linux__) && defined(GPU_SUPPORT)
+	#include "linux/btop_gpu_bridge.hpp"
+#endif
 
 using std::atomic;
 using std::cout;
@@ -87,13 +93,6 @@ namespace fs = std::filesystem;
 using namespace Tools;
 using namespace std::chrono_literals;
 using namespace std::literals;
-
-#if defined(GPU_SUPPORT) && defined(__linux__)
-namespace Gpu::Bridge {
-	void start();
-	void shutdown() noexcept;
-}
-#endif
 
 namespace {
 	volatile sig_atomic_t pending_quit_signal{};
@@ -118,7 +117,7 @@ namespace Global {
 		{"#801414", "██████╔╝   ██║   ╚██████╔╝██║        ╚═╝    ╚═╝"},
 		{"#000000", "╚═════╝    ╚═╝    ╚═════╝ ╚═╝"},
 	};
-	const string Version = "0.1.0";
+	const string Version = "0.1.1";
 
 	int coreCount;
 	string overlay;
@@ -923,6 +922,62 @@ static auto configure_tty_mode(std::optional<bool> force_tty) {
 	Logger::debug("TTY mode enabled: {}", Config::getB("tty_mode"));
 }
 
+#if defined(__linux__) && defined(GPU_SUPPORT)
+static auto diagnose_gpu() -> int {
+	utsname os{};
+	if (uname(&os) == 0) fmt::println("OS: {} {} ({})", os.sysname, os.release, os.machine);
+	else fmt::println("OS: Linux");
+	fmt::println("BetterTop: {}", Global::Version);
+
+	Config::set("shown_gpus", string{"nvidia"});
+	Gpu::Bridge::start();
+	const auto deadline = std::chrono::steady_clock::now() + 6s;
+	while (std::chrono::steady_clock::now() < deadline) {
+		const auto& current = Gpu::Bridge::poll();
+		if (current.has_sample || current.state == Gpu::Bridge::State::unavailable) break;
+		std::this_thread::sleep_for(50ms);
+	}
+	const auto snapshot = Gpu::Bridge::poll();
+	Gpu::Bridge::shutdown();
+
+	const auto state_name = [&] {
+		switch (snapshot.state) {
+			case Gpu::Bridge::State::starting: return "starting";
+			case Gpu::Bridge::State::healthy: return "healthy";
+			case Gpu::Bridge::State::stale: return "stale";
+			case Gpu::Bridge::State::unavailable: return "unavailable";
+			case Gpu::Bridge::State::disabled: return "disabled";
+		}
+		return "unknown";
+	}();
+	const auto helper_status = [&] {
+		switch (snapshot.helper_status) {
+			case BETTERTOP_GPU_STATUS_OK: return "ok";
+			case BETTERTOP_GPU_STATUS_UNAVAILABLE: return "unavailable";
+			case BETTERTOP_GPU_STATUS_ERROR: return "error";
+		}
+		return "unknown";
+	}();
+	fmt::println("Worker: {} (status={}, detail={}), sample age: {} ms", state_name, helper_status,
+				 snapshot.status_detail, snapshot.age_ms);
+	if (snapshot.has_sample) {
+		fmt::println("Inventory: {} NVIDIA GPU(s)", snapshot.devices.size());
+		for (const auto& device : snapshot.devices) {
+			fmt::println("  [{}] {} | {} | {}", device.display_index, replace_ascii_control(device.name),
+						 replace_ascii_control(device.uuid), replace_ascii_control(device.pci_bus_id));
+			if (device.valid_fields & BETTERTOP_GPU_DEVICE_MEMORY_TOTAL)
+				fmt::println("      memory: {} / {} MiB",
+					device.memory_used_bytes / (1024 * 1024), device.memory_total_bytes / (1024 * 1024));
+			if (device.valid_fields & BETTERTOP_GPU_DEVICE_GPU_UTIL)
+				fmt::println("      GPU utilization: {}%", device.gpu_util_pct);
+		}
+		if (snapshot.flags & BETTERTOP_GPU_TRUNCATED_DEVICES) fmt::println("  Inventory was truncated.");
+	} else {
+		fmt::println("No NVIDIA sample received.");
+	}
+	return snapshot.state == Gpu::Bridge::State::healthy && !snapshot.devices.empty() ? 0 : 1;
+}
+#endif
 
 //* --------------------------------------------- Main starts here! ---------------------------------------------------
 [[nodiscard]] auto btop_main(const std::span<const std::string_view> args) -> int {
@@ -1035,6 +1090,14 @@ static auto configure_tty_mode(std::optional<bool> force_tty) {
 	init_config(cli.low_color, cli.filter);
 	if (cli.classic) Config::set("ml_view", false);
 	if (cli.fun_mode.has_value()) Config::set("ml_fun", cli.fun_mode.value());
+	if (cli.diagnose_gpu) {
+#if defined(__linux__) && defined(GPU_SUPPORT)
+		return diagnose_gpu();
+#else
+		fmt::println("GPU diagnostic is available on Linux NVIDIA builds only.");
+		return 2;
+#endif
+	}
 
 	//? Try to find and set a UTF-8 locale
 	if (std::setlocale(LC_ALL, "") != nullptr and not std::string_view { std::setlocale(LC_ALL, "") }.contains(";")

@@ -60,7 +60,10 @@ focused. It has not been soaked on the four-GPU Blackwell workstation.
 | `q` | Quit |
 
 For command-line options, run `bettertop --help`. Use `--classic` to start in
-the original btop layout. See [THIRD_PARTY.md](THIRD_PARTY.md) for component
+the original btop layout. On Linux, `bettertop --diagnose-gpu` runs a bounded
+NVIDIA helper check without entering the terminal UI. For workstation
+validation, run it before a representative training run, then leave `bettertop`
+open during the workload. See [THIRD_PARTY.md](THIRD_PARTY.md) for component
 licenses and upstream revisions.
 
 ---

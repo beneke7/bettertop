@@ -116,6 +116,10 @@ namespace Cli {
 				cli.classic = true;
 				continue;
 			}
+			if (arg == "--diagnose-gpu") {
+				cli.diagnose_gpu = true;
+				continue;
+			}
 			if (arg.starts_with("--fun=")) {
 				auto mode = arg.substr(6);
 				if (mode != "cat" && mode != "rocket" && mode != "off") {
@@ -282,6 +286,7 @@ namespace Cli {
 			"  {2}    --no-tty{1}            Force disable tty mode\n"
 			"  {2}-u, --update{1} <ms>       Set an initial update rate in milliseconds\n"
 			"  {2}    --classic{1}            Start with the classic btop layout\n"
+			"  {2}    --diagnose-gpu{1}       Run a bounded, noninteractive Linux NVIDIA check\n"
 			"  {2}    --fun=cat|rocket|off{1} Select a metric-driven footer mode\n"
 			"  {2}    --check-ml-layout{1}   Check compact layout bounds and row counts\n"
 			"  {2}    --default-config{1}    Print default config to standard output\n"
