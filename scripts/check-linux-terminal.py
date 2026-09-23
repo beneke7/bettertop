@@ -101,7 +101,7 @@ def main():
         fake_helper.chmod(0o755)
 
         try:
-            output = run(fake_ui, ["--update", "500"], env, 8,
+            output = run(fake_ui, ["--update", "100"], env, 8,
                          lambda captured: b"stale" in captured and helper_log.exists()
                          and len(helper_log.read_text().splitlines()) >= 2)
             assert b"CPU " in output, "host metrics stopped while the helper stalled"
