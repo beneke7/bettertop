@@ -84,7 +84,12 @@ def main():
         fake_ui = fake_dir / "bettertop"
         shutil.copy2(binary, fake_ui)
         helper_log = root / "helper-pids"
-        env["BETTERTOP_HELPER_LOG"] = str(helper_log)
+        ml_env = env.copy()
+        ml_env.update(
+            XDG_CONFIG_HOME=str(root / "ml-config"),
+            XDG_STATE_HOME=str(root / "ml-state"),
+            BETTERTOP_HELPER_LOG=str(helper_log),
+        )
         fake_helper = fake_dir / "bettertop-gpu"
         fake_helper.write_text(
             "#!/usr/bin/env python3\n"
@@ -101,7 +106,7 @@ def main():
         fake_helper.chmod(0o755)
 
         try:
-            output = run(fake_ui, ["--update", "100"], env, 8,
+            output = run(fake_ui, ["--update", "100"], ml_env, 8,
                          lambda captured: b"stale" in captured and helper_log.exists()
                          and len(helper_log.read_text().splitlines()) >= 2)
             assert b"CPU " in output, "host metrics stopped while the helper stalled"

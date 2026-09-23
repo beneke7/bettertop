@@ -1,31 +1,35 @@
 # BetterTop
 
-BetterTop combines btop's host and process monitor with nvtop's NVIDIA GPU
-metrics in a compact dashboard for machine learning workstations. The NVIDIA
-collector runs in a separate `bettertop-gpu` process, so a stalled driver call
-does not block the host metrics or terminal controls.
+BetterTop combines btop's host and process monitor with GPU metrics in a compact
+dashboard for machine learning workstations. On Linux, NVIDIA collection runs
+in a separate `bettertop-gpu` process, so a stalled driver call does not block
+host metrics or terminal controls. Apple Silicon builds use macOS GPU metrics.
 
-The default screen shows CPU, RAM, swap, disk and network activity, the GPU
-fleet, and host processes joined with GPU process memory by PID. Press `v` for
-the classic btop layout, `g` to switch between GPU-only and all processes,
+The default screen shows CPU, RAM, swap, disk and network activity, GPU metrics
+where available, and host processes. On Linux, GPU process memory joins host
+processes by PID. Press `v` for the classic btop layout, `g` to switch between
+GPU-only and all processes,
 `x` to cycle the optional cat/rocket footer, and `q` to quit. The playful modes
 are off by default; `--fun=cat` and `--fun=rocket` enable one at startup.
 
 ## Download
 
-Download the Linux x86_64 archive from [Releases](../../releases/latest), unpack
-it, and run `bin/bettertop`. Keep `bin/bettertop-gpu` beside it. The GPU view
-reports unavailable status when NVIDIA's driver library is missing. PCIe and
-NVLink diagnostics are excluded from the safe default profile.
+Install the latest release on Linux x86_64 or macOS 13+ (Apple Silicon and
+Intel) with one command:
 
 ```sh
-tar -xzf bettertop-*-linux-x86_64.tar.gz
-./bettertop-*/bin/bettertop
+curl -fsSL https://github.com/beneke7/bettertop/releases/latest/download/install.sh | sh
 ```
 
-The release archive includes the exact binary pair, themes, notices and
-licenses. Its `SHA256SUMS` file checks the archive. GitHub also provides source
-archives for each tagged release.
+The installer verifies the archive checksum and installs to `~/.local` by
+default. Add `~/.local/bin` to `PATH`, or run `~/.local/bin/bettertop`. For a
+manual install, download the matching archive from [Releases](../../releases).
+On Linux, keep `bettertop-gpu` beside `bettertop`. The NVIDIA view reports
+unavailable status when its driver library is missing; PCIe and NVLink
+diagnostics are off by default.
+
+Each release archive includes themes, notices and licenses, with its checksum
+listed in `SHA256SUMS`. GitHub also provides source archives for tagged releases.
 
 ## Build
 
@@ -49,7 +53,7 @@ focused. It has not been soaked on the four-GPU Blackwell workstation.
 | --- | --- |
 | `v` | Switch between compact ML and classic views |
 | `g` | Toggle GPU-only and all-process views |
-| `r` | Retry the NVIDIA helper |
+| `r` | Retry the Linux NVIDIA helper |
 | `←` / `→` | Change process sort: VRAM, GPU, CPU, RAM |
 | `[` / `]` | Page through GPU rows |
 | `x` | Cycle off, cat and rocket footer modes |

@@ -1,4 +1,4 @@
-name: Linux build and release
+name: Linux and macOS build and release
 
 on:
   push:
@@ -8,7 +8,7 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   linux-x86_64:
@@ -44,7 +44,7 @@ jobs:
       - name: Package and verify
         run: |
           version="${GITHUB_REF_NAME#v}"
-          bash scripts/package-release.sh build "$version" dist
+          bash scripts/package-release.sh build "$version" linux-x86_64 dist
           (cd dist && sha256sum --check SHA256SUMS)
           mkdir unpacked
           tar -xzf "dist/bettertop-${version}-linux-x86_64.tar.gz" -C unpacked
@@ -52,13 +52,109 @@ jobs:
           ./unpacked/bettertop-${version}-linux-x86_64/bin/bettertop-gpu --self-check
           python3 scripts/check-linux-terminal.py "unpacked/bettertop-${version}-linux-x86_64/bin/bettertop"
 
+      - name: Upload Linux archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bettertop-linux-x86_64
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  macos:
+    name: macOS ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+            gpu: ON
+          - runner: macos-15-intel
+            arch: x86_64
+            gpu: OFF
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install build tools
+        run: brew install cmake ninja
+
+      - name: Configure and build
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
+            -DBTOP_GPU=${{ matrix.gpu }} \
+            -DBUILD_TESTING=OFF
+          cmake --build build --parallel
+          ./build/bettertop --version
+          ./build/bettertop --check-ml-layout
+
+      - name: Package macOS archive
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          bash scripts/package-release.sh build "$version" "macos-${{ matrix.arch }}" dist
+          (cd dist && shasum -a 256 -c SHA256SUMS)
+          mkdir unpacked
+          tar -xzf "dist/bettertop-${version}-macos-${{ matrix.arch }}.tar.gz" -C unpacked
+          ./unpacked/bettertop-${version}-macos-${{ matrix.arch }}/bin/bettertop --version
+          ./unpacked/bettertop-${version}-macos-${{ matrix.arch }}/bin/bettertop --check-ml-layout
+
+      - name: Upload macOS archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bettertop-macos-${{ matrix.arch }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux-x86_64, macos]
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Check out installer
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download release archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p dist/linux dist/macos-arm64 dist/macos-x86_64
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name bettertop-linux-x86_64 --dir dist/linux
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name bettertop-macos-arm64 --dir dist/macos-arm64
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name bettertop-macos-x86_64 --dir dist/macos-x86_64
+          cp dist/linux/*.tar.gz dist/
+          cp dist/macos-arm64/*.tar.gz dist/
+          cp dist/macos-x86_64/*.tar.gz dist/
+          cp scripts/install.sh dist/install.sh
+          chmod 755 dist/install.sh
+          (cd dist && sha256sum *.tar.gz > SHA256SUMS)
+
       - name: Publish release assets
-        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
-            "dist/bettertop-${GITHUB_REF_NAME#v}-linux-x86_64.tar.gz" \
+            dist/bettertop-*.tar.gz \
             dist/SHA256SUMS \
+            dist/install.sh \
             --title "$GITHUB_REF_NAME" \
             --generate-notes
+
+      - name: Verify one-command Linux install
+        env:
+          BETTERTOP_PREFIX: ${{ runner.temp }}/bettertop-install
+        run: |
+          set -o pipefail
+          curl -fsSL "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/install.sh" | sh
+          "$BETTERTOP_PREFIX/bin/bettertop" --version
+          "$BETTERTOP_PREFIX/bin/bettertop-gpu" --self-check
