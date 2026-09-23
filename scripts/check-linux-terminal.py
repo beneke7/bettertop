@@ -105,7 +105,7 @@ def main():
                          lambda captured: b"stale" in captured and helper_log.exists()
                          and len(helper_log.read_text().splitlines()) >= 2)
             assert b"CPU " in output, "host metrics stopped while the helper stalled"
-            assert b"stale" in output, "stalled helper was not marked stale"
+            assert b"stale" in output, f"stalled helper was not marked stale; terminal tail: {output[-3000:]!r}"
             pids = [int(value) for value in helper_log.read_text().splitlines()]
             assert len(pids) >= 2, "helper did not restart after the first stalled child was reaped"
             assert len(pids) <= 3, f"helper restarted too often: {len(pids)} children"
