@@ -2006,8 +2006,27 @@ namespace Gpu {
 			if (row.valid_fields & BETTERTOP_GPU_PROCESS_GPU_UTIL)
 				process.util_percent = std::max(process.util_percent.value_or(0), row.gpu_util_pct);
 		}
-		for (auto& process : gpu_processes)
+		for (auto& process : gpu_processes) {
 			if (not process_memory_complete[process.pid]) process.mem_used.reset();
+			if (not process.mem_used or process.device_indices.empty()) continue;
+
+			uint64_t total_vram = 0;
+			bool total_valid = true;
+			for (const auto device_index : process.device_indices) {
+				if (device_index >= nvidia_device_count || !gpus[device_index].supported_functions.mem_total || gpus[device_index].mem_total <= 0) {
+					total_valid = false;
+					break;
+				}
+				const auto device_vram = static_cast<uint64_t>(gpus[device_index].mem_total);
+				if (device_vram > UINT64_MAX - total_vram) {
+					total_valid = false;
+					break;
+				}
+				total_vram += device_vram;
+			}
+			if (total_valid and total_vram > 0)
+				process.vram_percent = static_cast<unsigned>(std::min(100.0, std::round(static_cast<double>(*process.mem_used) * 100.0 / total_vram)));
+		}
 
 		long long avg = 0;
 		long long mem_usage_total = 0;
@@ -3296,14 +3315,22 @@ namespace Proc {
 	#if defined(GPU_SUPPORT)
 		if (not no_update and not pause_proc_list) {
 			std::unordered_map<size_t, unsigned> gpu_util_by_pid;
+			std::unordered_map<size_t, unsigned> gpu_vram_by_pid;
 			gpu_util_by_pid.reserve(Gpu::gpu_processes.size());
-			for (const auto& gpu_proc : Gpu::gpu_processes)
+			gpu_vram_by_pid.reserve(Gpu::gpu_processes.size());
+			for (const auto& gpu_proc : Gpu::gpu_processes) {
 				if (gpu_proc.util_percent)
 					gpu_util_by_pid.insert_or_assign(gpu_proc.pid, std::min(*gpu_proc.util_percent, 100U));
+				if (gpu_proc.vram_percent)
+					gpu_vram_by_pid.insert_or_assign(gpu_proc.pid, std::min(*gpu_proc.vram_percent, 100U));
+			}
 			for (auto& proc : current_procs) {
 				proc.gpu_percent.reset();
+				proc.gpu_vram_percent.reset();
 				if (const auto gpu = gpu_util_by_pid.find(proc.pid); gpu != gpu_util_by_pid.end())
 					proc.gpu_percent = gpu->second;
+				if (const auto gpu = gpu_vram_by_pid.find(proc.pid); gpu != gpu_vram_by_pid.end())
+					proc.gpu_vram_percent = gpu->second;
 			}
 		}
 	#endif

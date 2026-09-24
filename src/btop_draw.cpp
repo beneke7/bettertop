@@ -1920,6 +1920,11 @@ namespace Proc {
 
 			//? pause, per-core, reverse, tree and sorting
 			const auto& sorting = Config::getS("proc_sorting");
+			#if defined(__linux__) && defined(GPU_SUPPORT)
+			const bool gpu_sort = sorting == "gpu";
+			#else
+			const bool gpu_sort = false;
+			#endif
 			const int sort_len = sorting.size();
 			const int sort_pos = x + width - sort_len - 8;
 
@@ -1997,10 +2002,10 @@ namespace Proc {
 
 			out += (thread_size > 0 ? Mv::l(4) + "Threads: " : "")
 					+ ljust("User:", user_size) + ' '
-					+ rjust((mem_bytes ? "MemB" : "Mem%"), 5) + ' '
-					+ rjust("Cpu%", (show_graphs ? 10 : 5)) + Fx::ub;
+					+ rjust(gpu_sort ? "VRAM%" : (mem_bytes ? "MemB" : "Mem%"), 5) + ' '
+					+ rjust(gpu_sort ? "GPU%" : "Cpu%", (show_graphs ? 10 : 5)) + Fx::ub;
 #if defined(__linux__) && defined(GPU_SUPPORT)
-			if (width >= 85) out += ' ' + rjust("GPU%", 5);
+			if (width >= 85 and not gpu_sort) out += ' ' + rjust("GPU%", 5);
 #endif
 		}
 		//* End of redraw block
@@ -2161,6 +2166,12 @@ namespace Proc {
 				if (mem_str.ends_with('.')) mem_str.pop_back();
 				mem_str += '%';
 			}
+#if defined(__linux__) && defined(GPU_SUPPORT)
+			if (gpu_sort) {
+				mem_str = p.gpu_vram_percent ? fmt::format("{}%", *p.gpu_vram_percent) : "--";
+				cpu_str = p.gpu_percent ? fmt::format("{}%", *p.gpu_percent) : "--";
+			}
+#endif
 
 			// Shorten process thread representation when larger than 5 digits: 10000 -> 10K ...
 			const std::string proc_threads_string = [&] {
@@ -2178,7 +2189,7 @@ namespace Proc {
 				+ (p_graphs.contains(p.pid) ? Mv::l(5) + c_color + p_graphs.at(p.pid)({(p.cpu_p >= 0.1 and p.cpu_p < 5 ? 5ll : (long long)round(p.cpu_p))}, data_same) : "") + end + ' '
 				+ c_color + rjust(cpu_str, 4) + "  " + end;
 #if defined(__linux__) && defined(GPU_SUPPORT)
-			if (width >= 85) {
+			if (width >= 85 and not gpu_sort) {
 				const string gpu_str = p.gpu_percent ? to_string(*p.gpu_percent) + '%' : "--";
 				out += c_color + rjust(gpu_str, 5) + ' ' + end;
 			}

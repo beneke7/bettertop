@@ -137,6 +137,7 @@ namespace Gpu {
 		vector<unsigned> device_indices;
 		std::optional<uint64_t> mem_used;
 		std::optional<unsigned> util_percent;
+		std::optional<unsigned> vram_percent;
 		bool compute{};
 		bool graphics{};
 	};
@@ -409,6 +410,7 @@ namespace Proc {
 		bool collapsed{};
 		bool filtered{};
 		std::optional<unsigned> gpu_percent{};
+		std::optional<unsigned> gpu_vram_percent{};
 	};
 
 	//* Container for process info box

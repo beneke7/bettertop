@@ -1,3 +1,10 @@
+## BetterTop v0.1.10-debug (pre-release)
+
+References | Description
+--- | ---
+ | Show per-process GPU utilization and VRAM percentage in the GPU-sorted process table.
+ | Continue runner stall diagnosis with SSH-safe terminal output and phase-aware watchdog logs.
+
 ## BetterTop v0.1.9-debug (pre-release)
 
 References | Description
