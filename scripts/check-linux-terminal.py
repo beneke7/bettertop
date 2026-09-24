@@ -336,6 +336,14 @@ def fixture_visible(output):
     return all("Blackwell " + str(index) in rows.get(6 + index, "") for index in range(4)) \
         and "424242" in rows.get(13, "") and "120G" in rows.get(29, "")
 
+def classic_graphs_visible(output):
+    text = output.decode("utf-8", "replace")
+    rows = screen_rows(output)
+    pixels = any(0x2801 <= ord(char) <= 0x28ff for char in text)
+    return pixels and any("CPU" in row for row in rows.values()) \
+        and any("GPU" in row for row in rows.values()) \
+        and "NVIDIA Blackwell" in text
+
 
 def main():
     if not sys.platform.startswith("linux"):
@@ -379,6 +387,13 @@ def main():
         assert "--" in gpu_without_util, gpu_without_util
         assert b"CPU " in output, "host metrics disappeared with the fixture"
         print("Four-GPU fixture passed: partial frames, 120 GiB fleet use, PID aggregation, unknown fields")
+
+        classic_env = env_for(env, root, "classic-graphs", "fixture")
+        classic_output = run(fake_ui, ["--classic", "--update", "100"], classic_env, 6,
+                             classic_graphs_visible)
+        assert classic_graphs_visible(classic_output), "classic CPU/GPU pixel graphs were not rendered"
+        assert_reaped(root / "classic-graphs-helper-pids")
+        print("Classic view passed: original CPU/GPU panels rendered braille graph pixels")
 
         diagnostic_env = env_for(env, root, "diagnostic", "fixture")
         diagnostic = subprocess.run([str(fake_ui), "--diagnose-gpu"], env=diagnostic_env,

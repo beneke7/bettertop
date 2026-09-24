@@ -7,7 +7,8 @@ host metrics or terminal controls. Apple Silicon builds use macOS GPU metrics.
 
 The default screen shows CPU, RAM, swap, disk and network activity, GPU metrics
 where available, and host processes. On Linux, GPU process memory joins host
-processes by PID. Press `v` for the classic btop layout, `g` to switch between
+processes by PID. Press `v` for the original btop layout, including its CPU/GPU
+pixel graph panels; `--classic` starts there. Press `g` to switch between
 GPU-only and all processes,
 `x` to cycle the optional cat/rocket footer, and `q` to quit. The playful modes
 are off by default; `--fun=cat` and `--fun=rocket` enable one at startup.
