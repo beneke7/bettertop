@@ -446,9 +446,11 @@ def main():
 
         output = run(fake_ui, ["--update", "100", "--fun=cat"], recovery_env, 10, recovered)
         rows = screen_rows(output)
+        pids = helper_pids(recovery_log)
         assert b"stale" in output and "healthy" in rows.get(30, ""), \
-            f"fresh GPU sample did not clear stale state: footer={rows.get(30)!r}"
-        assert len(helper_pids(recovery_log)) <= 3, "recovery caused a helper process storm"
+            f"fresh GPU sample did not clear stale state: footer={rows.get(30)!r}, helpers={pids}, " \
+            f"fixture_visible={fixture_visible(output)}"
+        assert len(pids) <= 3, "recovery caused a helper process storm"
         assert_reaped(recovery_log)
         print("Recovery passed: a fresh four-GPU sample cleared stale state")
 
