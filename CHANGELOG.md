@@ -1,3 +1,10 @@
+## BetterTop v0.1.7
+
+References | Description
+--- | ---
+ | Keep slow macOS thermal sensor reads from blocking the collector when a previous read is still running.
+ | Fix a cross-file static initialization order crash before startup.
+
 ## v1.4.7
 
 References | Description | Author(s)
