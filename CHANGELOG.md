@@ -1,3 +1,11 @@
+## BetterTop v0.1.11-debug (pre-release)
+
+References | Description
+--- | ---
+ | Use a separate nonblocking terminal output descriptor so SSH backpressure cannot change stdin behavior.
+ | Show per-process GPU utilization and VRAM percentage when GPU sorting is selected.
+ | Report the active runner phase when the worker becomes slow or stalls.
+
 ## BetterTop v0.1.10-debug (pre-release)
 
 References | Description

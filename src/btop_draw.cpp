@@ -1781,6 +1781,13 @@ namespace Proc {
 		else if (pause_proc_list and selected > select_max)
 			start++;
 
+		const auto& sorting = Config::getS("proc_sorting");
+		#if defined(__linux__) && defined(GPU_SUPPORT)
+		const bool gpu_sort = sorting == "gpu";
+		#else
+		const bool gpu_sort = false;
+		#endif
+
 		//? redraw if selection reaches or leaves the end of the list
 		if (selected != Config::getI("proc_last_selected")) {
 			if (selected >= select_max and start >= numpids - select_max) {
@@ -1916,15 +1923,9 @@ namespace Proc {
 					Input::mouse_mappings.erase("delete");
 				else if (not filter_text.empty())
 					Input::mouse_mappings["delete"] = {y, x + 11 + f_len, 1, 3};
-			}
+				}
 
 			//? pause, per-core, reverse, tree and sorting
-			const auto& sorting = Config::getS("proc_sorting");
-			#if defined(__linux__) && defined(GPU_SUPPORT)
-			const bool gpu_sort = sorting == "gpu";
-			#else
-			const bool gpu_sort = false;
-			#endif
 			const int sort_len = sorting.size();
 			const int sort_pos = x + width - sort_len - 8;
 

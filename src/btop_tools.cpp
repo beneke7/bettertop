@@ -66,8 +66,7 @@ namespace Term {
 	namespace {
 		struct termios initial_settings{};
 		bool initial_settings_valid{};
-		int initial_stdout_flags{-1};
-		std::atomic<bool> nonblocking_output{};
+		int nonblocking_output_fd{-1};
 		std::atomic<bool> output_blocked{};
 		std::mutex output_mutex;
 		volatile sig_atomic_t termios_changed{};
@@ -75,17 +74,14 @@ namespace Term {
 		constexpr char restore_bytes[] = "\x1b[?2026l\x1b[?1002l\x1b[?1015l\x1b[?1006l\x1b[?1003l\x1b[0m\x1b[?1049l\x1b[?25h";
 
 		void enable_nonblocking_output() noexcept {
-			if (initial_stdout_flags < 0)
-				initial_stdout_flags = fcntl(STDOUT_FILENO, F_GETFL, 0);
-			if (initial_stdout_flags >= 0)
-				nonblocking_output = fcntl(STDOUT_FILENO, F_SETFL, initial_stdout_flags | O_NONBLOCK) == 0;
+			if (const char* tty = ttyname(STDOUT_FILENO); tty != nullptr)
+				nonblocking_output_fd = open(tty, O_WRONLY | O_NONBLOCK | O_CLOEXEC | O_NOCTTY);
 			output_blocked = false;
 		}
 
-		void restore_output_flags() noexcept {
-			if (initial_stdout_flags >= 0)
-				fcntl(STDOUT_FILENO, F_SETFL, initial_stdout_flags);
-			nonblocking_output = false;
+		void close_nonblocking_output() noexcept {
+			if (nonblocking_output_fd >= 0) close(nonblocking_output_fd);
+			nonblocking_output_fd = -1;
 			output_blocked = false;
 		}
 
@@ -103,15 +99,17 @@ namespace Term {
 
 		void restore_state(const bool update_initialized) noexcept {
 			if (escape_modes_started) {
-				write_all(STDOUT_FILENO, restore_bytes, sizeof(restore_bytes) - 1);
+				write_all(nonblocking_output_fd >= 0 ? nonblocking_output_fd : STDOUT_FILENO, restore_bytes, sizeof(restore_bytes) - 1);
 				escape_modes_started = 0;
 			}
 			if (termios_changed and initial_settings_valid) {
 				tcsetattr(STDIN_FILENO, TCSANOW, &initial_settings);
 				termios_changed = 0;
 			}
-			restore_output_flags();
-			if (update_initialized) initialized = false;
+			if (update_initialized) {
+				close_nonblocking_output();
+				initialized = false;
+			}
 		}
 	}
 
@@ -215,14 +213,14 @@ namespace Term {
 	void output(const std::string_view text) {
 		std::lock_guard lock(output_mutex);
 		if (not initialized or text.empty()) return;
-		if (not nonblocking_output.load(std::memory_order_relaxed)) {
+		if (nonblocking_output_fd < 0) {
 			cout.write(text.data(), static_cast<std::streamsize>(text.size())) << flush;
 			return;
 		}
 
 		// ponytail: Drop stale frames under PTY backpressure; redraw current state when it drains.
 		if (output_blocked.load(std::memory_order_relaxed)) {
-			struct pollfd fd{STDOUT_FILENO, POLLOUT, 0};
+			struct pollfd fd{nonblocking_output_fd, POLLOUT, 0};
 			if (poll(&fd, 1, 0) <= 0 or (fd.revents & POLLOUT) == 0) return;
 			output_blocked = false;
 			Global::resized = true;
@@ -231,7 +229,7 @@ namespace Term {
 
 		const char* data = text.data();
 		for (size_t remaining = text.size(); remaining > 0;) {
-			const auto written = ::write(STDOUT_FILENO, data, remaining);
+			const auto written = ::write(nonblocking_output_fd, data, remaining);
 			if (written > 0) {
 				data += written;
 				remaining -= static_cast<size_t>(written);
