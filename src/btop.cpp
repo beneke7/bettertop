@@ -80,8 +80,6 @@ tab-size = 4
 #endif
 
 using std::atomic;
-using std::cout;
-using std::flush;
 using std::min;
 using std::string;
 using std::string_view;
@@ -117,7 +115,7 @@ namespace Global {
 		{"#801414", "██████╔╝   ██║   ╚██████╔╝██║        ╚═╝    ╚═╝"},
 		{"#000000", "╚═════╝    ╚═╝    ╚═════╝ ╚═╝"},
 	};
-	const string Version = "0.1.8";
+	const string Version = "0.1.9-debug";
 
 	int coreCount;
 	string overlay;
@@ -184,7 +182,7 @@ void term_resize(bool force) {
 		sleep_ms(100);
 		if (Term::width < minWidth or Term::height < minHeight) {
 			int width = Term::width, height = Term::height;
-			cout << fmt::format("{clear}{fg_white}"
+			Term::output(fmt::format("{clear}{fg_white}"
 					"{mv1}Terminal size too small:"
 					"{mv2} Width = {fg_width}{width} {fg_white}Height = {fg_height}{height}"
 					"{mv3}{fg_white}Needed for current config:"
@@ -200,7 +198,7 @@ void term_resize(bool force) {
 					"mv4"_a = Mv::to((height / 2) + 2, (width / 2) - 10),
 						"minWidth"_a = minWidth,
 						"minHeight"_a = minHeight
-			) << std::flush;
+			));
 
 			bool got_key = false;
 			for (; not Term::refresh() and not got_key; got_key = Input::poll(10));
@@ -406,6 +404,11 @@ namespace Runner {
 	atomic<bool> waiting (false);
 	atomic<bool> redraw (false);
 	atomic<bool> coreNum_reset (false);
+	atomic<const char*> phase{"waiting"};
+
+	static void set_phase(const char* value) noexcept {
+		phase.store(value, std::memory_order_relaxed);
+	}
 
 	static inline auto set_active(bool value) noexcept {
 		active.store(value);
@@ -536,6 +539,7 @@ namespace Runner {
 
 			//? Atomic lock used for blocking non thread-safe actions in main thread
 			auto lck = active.lock();
+			set_phase("starting");
 
 			//? Set effective user if SUID bit is set
 			gain_priv powers{};
@@ -563,6 +567,7 @@ namespace Runner {
 			//* Run collection and draw functions for all boxes
 			try {
 				if (ml_view) {
+					set_phase("CPU collect");
 					auto& cpu = Cpu::collect(conf.no_update);
 					if (coreNum_reset) {
 						coreNum_reset = false;
@@ -571,16 +576,24 @@ namespace Runner {
 						Input::interrupt();
 						continue;
 					}
+					set_phase("memory collect");
 					auto& mem = Mem::collect(conf.no_update);
+					set_phase("network collect");
 					auto& net = Net::collect(conf.no_update);
+					set_phase("process collect");
 					auto& processes = Proc::collect(conf.no_update);
 #if defined(GPU_SUPPORT)
+					set_phase("GPU collect");
 					auto& gpus = Gpu::collect(conf.no_update);
-					if (not pause_output)
+					if (not pause_output) {
+						set_phase("ML draw");
 						output += Ml::draw(cpu, mem, net, processes, gpus, conf.force_redraw, conf.no_update);
+					}
 #else
-					if (not pause_output)
+					if (not pause_output) {
+						set_phase("ML draw");
 						output += Ml::draw(cpu, mem, net, processes, conf.force_redraw, conf.no_update);
+					}
 #endif
 				} else {
 #if defined(GPU_SUPPORT)
@@ -604,6 +617,7 @@ namespace Runner {
 				const bool collect_gpu = gpu_in_cpu_panel or not gpu_panels.empty();
 #endif
 				if (collect_gpu) {
+					set_phase("GPU collect");
 					if (Global::debug) debug_timer("gpu", collect_begin);
 					gpus = Gpu::collect(conf.no_update);
 					if (Global::debug) debug_timer("gpu", collect_done);
@@ -621,6 +635,7 @@ namespace Runner {
 						if (Global::debug) debug_timer("cpu", collect_begin);
 
 						//? Start collect
+						set_phase("CPU collect");
 						auto cpu = Cpu::collect(conf.no_update);
 
 						if (coreNum_reset) {
@@ -635,6 +650,7 @@ namespace Runner {
 
 						//? Draw box
 						if (not pause_output) {
+							set_phase("CPU draw");
 							output += Cpu::draw(
 								cpu,
 #if defined(GPU_SUPPORT)
@@ -658,9 +674,11 @@ namespace Runner {
 						if (Global::debug) debug_timer("gpu", draw_begin_only);
 
 						//? Draw box
-						if (not pause_output)
+						if (not pause_output) {
+							set_phase("GPU draw");
 							for (unsigned long i = 0; i < gpu_panels.size(); ++i)
 								output += Gpu::draw(gpus_ref[gpu_panels[i]], i, conf.force_redraw, conf.no_update);
+						}
 
 						if (Global::debug) debug_timer("gpu", draw_done);
 					}
@@ -675,12 +693,16 @@ namespace Runner {
 						if (Global::debug) debug_timer("mem", collect_begin);
 
 						//? Start collect
+						set_phase("memory collect");
 						auto mem = Mem::collect(conf.no_update);
 
 						if (Global::debug) debug_timer("mem", draw_begin);
 
 						//? Draw box
-						if (not pause_output) output += Mem::draw(mem, conf.force_redraw, conf.no_update);
+						if (not pause_output) {
+							set_phase("memory draw");
+							output += Mem::draw(mem, conf.force_redraw, conf.no_update);
+						}
 
 						if (Global::debug) debug_timer("mem", draw_done);
 					}
@@ -695,12 +717,16 @@ namespace Runner {
 						if (Global::debug) debug_timer("net", collect_begin);
 
 						//? Start collect
+						set_phase("network collect");
 						auto net = Net::collect(conf.no_update);
 
 						if (Global::debug) debug_timer("net", draw_begin);
 
 						//? Draw box
-						if (not pause_output) output += Net::draw(net, conf.force_redraw, conf.no_update);
+						if (not pause_output) {
+							set_phase("network draw");
+							output += Net::draw(net, conf.force_redraw, conf.no_update);
+						}
 
 						if (Global::debug) debug_timer("net", draw_done);
 					}
@@ -715,12 +741,16 @@ namespace Runner {
 						if (Global::debug) debug_timer("proc", collect_begin);
 
 						//? Start collect
+						set_phase("process collect");
 						auto proc = Proc::collect(conf.no_update);
 
 						if (Global::debug) debug_timer("proc", draw_begin);
 
 						//? Draw box
-						if (not pause_output) output += Proc::draw(proc, conf.force_redraw, conf.no_update);
+						if (not pause_output) {
+							set_phase("process draw");
+							output += Proc::draw(proc, conf.force_redraw, conf.no_update);
+						}
 
 						if (Global::debug) debug_timer("proc", draw_done);
 					}
@@ -805,10 +835,12 @@ namespace Runner {
 
 			//? If overlay isn't empty, print output without color and then print overlay on top
 			const bool term_sync = Config::getB("terminal_sync");
+			set_phase("terminal output");
 			Term::output((term_sync ? Term::sync_start : "") + (conf.overlay.empty()
 					? output
 					: (output.empty() ? "" : Fx::ub + Theme::c("inactive_fg") + Fx::uncolor(output)) + conf.overlay)
 				+ (term_sync ? Term::sync_end : ""));
+			set_phase("idle");
 		}
 		//* ----------------------------------------------- THREAD LOOP -----------------------------------------------
 		runner_exited.release();
@@ -837,22 +869,22 @@ namespace Runner {
 	void run(const string& box, bool no_update, bool force_redraw) {
 		atomic_wait_for(active, true, 10'000);
 		if (active) {
-			Logger::warning("Runner thread slow (>10s), waiting up to 30s...");
+			Logger::warning("Runner thread slow (>10s) during {}, waiting up to 30s...", phase.load(std::memory_order_relaxed));
 			atomic_wait_for(active, true, 20'000);
 		}
 		if (active) {
-			Global::exit_error_msg = "Runner thread stalled for 30s, exiting.";
+			Global::exit_error_msg = fmt::format("Runner thread stalled for 30s during {}, exiting.", phase.load(std::memory_order_relaxed));
 			clean_quit(1);
 		}
 		if (stopping or Global::resized) return;
 
 		if (box == "overlay") {
 			const bool term_sync = Config::getB("terminal_sync");
-			cout << (term_sync ? Term::sync_start : "") << Global::overlay << (term_sync ? Term::sync_end : "") << flush;
+			Term::output((term_sync ? Term::sync_start : "") + Global::overlay + (term_sync ? Term::sync_end : ""));
 		}
 		else if (box == "clock") {
 			const bool term_sync = Config::getB("terminal_sync");
-			cout << (term_sync ? Term::sync_start : "") << Global::clock << (term_sync ? Term::sync_end : "") << flush;
+			Term::output((term_sync ? Term::sync_start : "") + Global::clock + (term_sync ? Term::sync_end : ""));
 		}
 		else {
 			Config::unlock();
@@ -1256,7 +1288,7 @@ static auto diagnose_gpu() -> int {
 
 		//? Print out box outlines
 		const bool term_sync = Config::getB("terminal_sync");
-		cout << (term_sync ? Term::sync_start : "") << Cpu::box << Mem::box << Net::box << Proc::box << (term_sync ? Term::sync_end : "") << flush;
+		Term::output((term_sync ? Term::sync_start : "") + Cpu::box + Mem::box + Net::box + Proc::box + (term_sync ? Term::sync_end : ""));
 	}
 
 

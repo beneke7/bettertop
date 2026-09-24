@@ -14,8 +14,11 @@ esac
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/bettertop-install.XXXXXX")
 trap 'rm -rf "$tmp"' 0
 trap 'exit 1' HUP INT TERM
-curl -fsSL "https://api.github.com/repos/$repo/releases/latest" -o "$tmp/release.json"
-tag=$(sed -n 's/^[[:space:]]*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' "$tmp/release.json" | sed -n '1p')
+tag=${BETTERTOP_TAG:-}
+if [ -z "$tag" ]; then
+	curl -fsSL "https://api.github.com/repos/$repo/releases/latest" -o "$tmp/release.json"
+	tag=$(sed -n 's/^[[:space:]]*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' "$tmp/release.json" | sed -n '1p')
+fi
 if [ -z "$tag" ]; then
 	printf 'Could not find the latest BetterTop release.\n' >&2
 	exit 1

@@ -1,3 +1,11 @@
+## BetterTop v0.1.9-debug (pre-release)
+
+References | Description
+--- | ---
+ | Prevent blocked SSH/PTY output from holding the render worker; drop stale frames and redraw after output resumes.
+ | Report the active runner phase when the worker becomes slow or stalls.
+ | Package with debug symbols and allow the installer to pin this pre-release tag.
+
 ## BetterTop v0.1.8
 
 References | Description

@@ -25,13 +25,15 @@ jobs:
           sudo apt-get install -y --no-install-recommends cmake g++-14 gcc-14 ninja-build
 
       - name: Configure
-        run: >-
-          cmake -S . -B build -G Ninja
-          -DCMAKE_BUILD_TYPE=Release
-          -DCMAKE_C_COMPILER=gcc-14
-          -DCMAKE_CXX_COMPILER=g++-14
-          -DBTOP_GPU=ON
-          -DBUILD_TESTING=ON
+        run: |
+          build_type=Release
+          if [[ "$GITHUB_REF_NAME" == *-debug ]]; then build_type=RelWithDebInfo; fi
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE="$build_type" \
+            -DCMAKE_C_COMPILER=gcc-14 \
+            -DCMAKE_CXX_COMPILER=g++-14 \
+            -DBTOP_GPU=ON \
+            -DBUILD_TESTING=ON
 
       - name: Build and check
         run: |
@@ -93,8 +95,10 @@ jobs:
 
       - name: Configure and build
         run: |
+          build_type=Release
+          if [[ "$GITHUB_REF_NAME" == *-debug ]]; then build_type=RelWithDebInfo; fi
           cmake -S . -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_BUILD_TYPE="$build_type" \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
             -DBTOP_GPU=${{ matrix.gpu }} \
             -DBUILD_TESTING=OFF
@@ -152,11 +156,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          prerelease_args=()
+          if [[ "$GITHUB_REF_NAME" == *-debug ]]; then prerelease_args+=(--prerelease); fi
           gh release create "$GITHUB_REF_NAME" \
             dist/bettertop-*.tar.gz \
             dist/SHA256SUMS \
             dist/install.sh \
             --title "$GITHUB_REF_NAME" \
+            "${prerelease_args[@]}" \
             --generate-notes
 
       - name: Verify one-command Linux install
@@ -164,6 +171,6 @@ jobs:
           BETTERTOP_PREFIX: ${{ runner.temp }}/bettertop-install
         run: |
           set -o pipefail
-          curl -fsSL "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/install.sh" | sh
+          curl -fsSL "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/install.sh" | BETTERTOP_TAG="$GITHUB_REF_NAME" sh
           "$BETTERTOP_PREFIX/bin/bettertop" --version
           "$BETTERTOP_PREFIX/bin/bettertop-gpu" --self-check
