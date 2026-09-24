@@ -237,11 +237,12 @@ void clean_quit(int sig) {
 	if (Global::quitting) return;
 	Global::quitting = true;
 	Runner::request_stop();
-	if (not Term::restore()) _Exit(sig != -1 ? sig : 0);
+	const bool restored = Term::restore();
 	if (Global::_runner_started) {
 		const auto joined = Runner::join_for(5s);
 		if (not joined) _Exit(sig != -1 ? sig : 0);
 	}
+	if (not restored) Term::restore();
 
 #if defined(GPU_SUPPORT) && defined(__linux__)
 	if (gpu_bridge_started) Gpu::Bridge::shutdown();
