@@ -358,7 +358,7 @@ def main():
         pid_without_memory = next(row for row in rows.values() if "424243" in row)
         assert "83%" in pid_without_memory and "--" in pid_without_memory
         pid_without_util = next(row for row in rows.values() if "424244" in row)
-        assert "1G" in pid_without_util and "--" in pid_without_util
+        assert re.search(r"(?:^|\s)1(?:\.0)?G(?:\s|$)", pid_without_util) and "--" in pid_without_util, pid_without_util
         gpu_without_util = rows[7]
         assert "--" in gpu_without_util, gpu_without_util
         assert b"CPU " in output, "host metrics disappeared with the fixture"
