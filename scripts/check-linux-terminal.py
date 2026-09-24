@@ -40,7 +40,7 @@ with log_path.open("a") as log:
     log.write(str(os.getpid()) + "\n")
     log.flush()
 with events_path.open("a") as log:
-    log.write(f"start pid={os.getpid()} invocation={invocation} mode={mode}\n")
+    log.write(f"start pid={os.getpid()} invocation={invocation} mode={mode} time={time.monotonic():.3f}\n")
 signal.signal(signal.SIGTERM, signal.SIG_IGN)
 fd = os.open("/dev/null", os.O_RDONLY)
 os.dup2(fd, 0)
@@ -88,7 +88,12 @@ def fixture(sequence):
 
 def write_partial(data):
     for offset in range(0, len(data), 37):
-        os.write(1, data[offset:offset + 37])
+        try:
+            os.write(1, data[offset:offset + 37])
+        except OSError as error:
+            with events_path.open("a") as log:
+                log.write(f"write failed: {error!r}\n")
+            raise
         time.sleep(0.001)
 
 def hold():
@@ -121,6 +126,8 @@ elif mode == "fixture":
         log.write("streaming fixture\n")
     sequence = 1
     while True:
+        with events_path.open("a") as log:
+            log.write(f"fixture frame {sequence} time={time.monotonic():.3f}\n")
         write_partial(fixture(sequence))
         sequence += 1
         time.sleep(0.35)
@@ -129,6 +136,8 @@ elif mode == "recover" and invocation > 1:
         log.write("streaming recovered fixture\n")
     sequence = 1
     while True:
+        with events_path.open("a") as log:
+            log.write(f"recovery frame {sequence} time={time.monotonic():.3f}\n")
         write_partial(fixture(sequence))
         sequence += 1
         time.sleep(0.35)
