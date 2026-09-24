@@ -239,6 +239,7 @@ def suspend_resume(binary, env, log):
                 stopped = True
                 break
         assert stopped, "SIGTSTP did not stop the process after restoring the terminal"
+        drain(master, output, 0.2)
         for sequence in RESTORE_SEQUENCES:
             assert sequence in output, f"suspend restore sequence missing: {sequence!r}"
 
