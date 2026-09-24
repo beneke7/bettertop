@@ -607,6 +607,10 @@ namespace Runner {
 					if (Global::debug) debug_timer("gpu", collect_begin);
 					gpus = Gpu::collect(conf.no_update);
 					if (Global::debug) debug_timer("gpu", collect_done);
+					if (Global::resized) {
+						Input::interrupt();
+						continue;
+					}
 				}
 				auto& gpus_ref = gpus;
 #endif // GPU_SUPPORT
