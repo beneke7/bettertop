@@ -25,14 +25,15 @@
 
 using namespace std::string_view_literals;
 
-static constexpr auto BOLD = "\033[1m"sv;
-static constexpr auto BOLD_UNDERLINE = "\033[1;4m"sv;
-static constexpr auto BOLD_RED = "\033[1;31m"sv;
-static constexpr auto BOLD_GREEN = "\033[1;32m"sv;
-static constexpr auto BOLD_YELLOW = "\033[1;33m"sv;
-static constexpr auto BOLD_BRIGHT_BLACK = "\033[1;90m"sv;
-static constexpr auto YELLOW = "\033[33m"sv;
-static constexpr auto RESET = "\033[0m"sv;
+static const bool color = isatty(STDOUT_FILENO);
+static const auto BOLD = color ? "\033[1m"sv : ""sv;
+static const auto BOLD_UNDERLINE = color ? "\033[1;4m"sv : ""sv;
+static const auto BOLD_RED = color ? "\033[1;31m"sv : ""sv;
+static const auto BOLD_GREEN = color ? "\033[1;32m"sv : ""sv;
+static const auto BOLD_YELLOW = color ? "\033[1;33m"sv : ""sv;
+static const auto BOLD_BRIGHT_BLACK = color ? "\033[1;90m"sv : ""sv;
+static const auto YELLOW = color ? "\033[33m"sv : ""sv;
+static const auto RESET = color ? "\033[0m"sv : ""sv;
 
 static void version() noexcept {
 	if constexpr (GIT_COMMIT.empty()) {

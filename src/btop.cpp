@@ -264,7 +264,7 @@ void clean_quit(int sig) {
 	if (not Global::exit_error_msg.empty()) {
 		sig = 1;
 		Logger::error("{}", Global::exit_error_msg);
-		fmt::println(std::cerr, "{}ERROR: {}{}{}", Global::fg_red, Global::fg_white, Global::exit_error_msg, Fx::reset);
+		fmt::println(std::cerr, "ERROR: {}", Global::exit_error_msg);
 	}
 	Logger::info("Quitting! Runtime: {}", sec_to_dhms(time_s() - Global::start_time));
 
