@@ -427,7 +427,9 @@ def main():
         output = run(fake_ui, ["--update", "100"], runtime_env, 8,
                      runtime_restarted,
                      keys_after_ready=((b"g", 0.3), (b"\x1b[B", 0.3),
-                                       (b"f", 0.1), (b"python\n", 0.5)))
+                                       (b"f", 0.1), (b"p", 0.1), (b"y", 0.1),
+                                       (b"t", 0.1), (b"h", 0.1), (b"o", 0.1),
+                                       (b"n", 0.1), (b"\n", 0.5)))
         assert b"CPU " in output and output.count(b"CPU ") >= 3, "host metrics stopped during runtime hang"
         assert b"stale" in output and b"Processes [all]" in output and b"f python" in output
         assert len(helper_pids(runtime_log)) <= 3, "runtime hang caused a helper process storm"
