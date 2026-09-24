@@ -233,7 +233,7 @@ auto decode_frame(Controller& state, const unsigned char* frame, const bettertop
 
 	snapshot.devices = std::move(devices);
 	snapshot.processes = std::move(processes);
-	snapshot.sequence = header.sequence;
+	++snapshot.sequence; // Keep collector generations monotonic across helper restarts.
 	snapshot.sampled_at_ns = header.monotonic_sample_ns;
 	snapshot.has_sample = true;
 	state.backoff_ms = initial_backoff_ms;
@@ -408,7 +408,8 @@ auto poll() noexcept -> const Snapshot& {
 		update_health(state);
 		const bool startup_timed_out = !state.snapshot.has_sample && state.pid > 0 &&
 			Clock::now() - state.last_frame_at > std::chrono::nanoseconds(stale_after_ns);
-		const bool data_timed_out = state.snapshot.has_sample && state.snapshot.age_ms > stale_after_ns / 1'000'000ULL;
+		const bool data_timed_out = state.snapshot.has_sample && state.snapshot.age_ms > stale_after_ns / 1'000'000ULL &&
+			Clock::now() - state.last_frame_at > std::chrono::nanoseconds(stale_after_ns);
 		if (state.pid > 0 && (startup_timed_out || data_timed_out || !state.enabled)) {
 			close_pipe(state);
 			request_termination(state);
