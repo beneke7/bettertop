@@ -408,6 +408,7 @@ namespace Proc {
 		size_t tree_index{};
 		bool collapsed{};
 		bool filtered{};
+		std::optional<unsigned> gpu_percent{};
 	};
 
 	//* Container for process info box

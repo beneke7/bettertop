@@ -3293,6 +3293,20 @@ namespace Proc {
 
 			old_cputimes = cputimes;
 		}
+	#if defined(GPU_SUPPORT)
+		if (not no_update and not pause_proc_list) {
+			std::unordered_map<size_t, unsigned> gpu_util_by_pid;
+			gpu_util_by_pid.reserve(Gpu::gpu_processes.size());
+			for (const auto& gpu_proc : Gpu::gpu_processes)
+				if (gpu_proc.util_percent)
+					gpu_util_by_pid.insert_or_assign(gpu_proc.pid, std::min(*gpu_proc.util_percent, 100U));
+			for (auto& proc : current_procs) {
+				proc.gpu_percent.reset();
+				if (const auto gpu = gpu_util_by_pid.find(proc.pid); gpu != gpu_util_by_pid.end())
+					proc.gpu_percent = gpu->second;
+			}
+		}
+	#endif
 		//* ---------------------------------------------Collection done-----------------------------------------------
 
 		//* Match filter if defined

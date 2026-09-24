@@ -76,6 +76,7 @@ def fixture(sequence):
     memory = (1 << 2) | (1 << 3)
     records = [device(i, memory | (1 if i != 1 else 0), (i + 1) * 20) for i in range(4)]
     processes = [
+        process(0, os.getppid(), 1 | 2, 0, 97, 1),
         process(0, 424242, 1 | 2, 6 * GIB, 55, 1),
         process(1, 424242, 1 | 2, 7 * GIB, 40, 1),
         process(2, 424243, 2, 0, 83, 2),
@@ -342,6 +343,10 @@ def classic_graphs_visible(output):
     return pixels and "CPU" in text \
         and all(f"GPU{index}" in text for index in range(4))
 
+def classic_gpu_process_visible(output):
+    text = CSI.sub(b"", output).decode("utf-8", "replace")
+    return "GPU%" in text and "gpu" in text and "97%" in text
+
 
 def main():
     if not sys.platform.startswith("linux"):
@@ -388,10 +393,12 @@ def main():
 
         classic_env = env_for(env, root, "classic-graphs", "fixture")
         classic_output = run(fake_ui, ["--classic", "--update", "100"], classic_env, 6,
-                             classic_graphs_visible)
+                             classic_graphs_visible, size=(30, 180),
+                             keys_after_ready=((b"\x1b[C", 1),))
         assert classic_graphs_visible(classic_output), "classic CPU/GPU pixel graphs were not rendered"
+        assert classic_gpu_process_visible(classic_output), "GPU-ranked process data was not rendered in classic view"
         assert_reaped(root / "classic-graphs-helper-pids")
-        print("Classic view passed: original CPU/GPU panels rendered braille graph pixels")
+        print("Classic view passed: CPU/GPU pixel panels and GPU-ranked process utilization rendered")
 
         diagnostic_env = env_for(env, root, "diagnostic", "fixture")
         diagnostic = subprocess.run([str(fake_ui), "--diagnose-gpu"], env=diagnostic_env,

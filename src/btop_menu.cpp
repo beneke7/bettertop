@@ -822,7 +822,7 @@ namespace Menu {
 				"Possible values:",
 				"\"pid\", \"program\", \"arguments\", \"threads\",",
 				"\"user\", \"memory\", \"cpu lazy\" and",
-				"\"cpu direct\".",
+				"\"cpu direct\"; \"gpu\" with Linux NVIDIA process data.",
 				"",
 				"\"cpu lazy\" updates top process over time.",
 				"\"cpu direct\" updates top process",

@@ -117,6 +117,7 @@ bool set_priority(pid_t pid, int priority) {
 			case 5: rng::stable_sort(proc_vec, rng::less{}, &proc_info::mem); 		break;
 			case 6: rng::stable_sort(proc_vec, rng::less{}, &proc_info::cpu_p);		break;
 			case 7: rng::stable_sort(proc_vec, rng::less{}, &proc_info::cpu_c);		break;
+			case 8: rng::stable_sort(proc_vec, rng::less{}, &proc_info::gpu_percent); break;
 			}
 		}
 		else {
@@ -129,6 +130,7 @@ bool set_priority(pid_t pid, int priority) {
 			case 5: rng::stable_sort(proc_vec, rng::greater{}, &proc_info::mem); 		break;
 			case 6: rng::stable_sort(proc_vec, rng::greater{}, &proc_info::cpu_p);   	break;
 			case 7: rng::stable_sort(proc_vec, rng::greater{}, &proc_info::cpu_c);   	break;
+			case 8: rng::stable_sort(proc_vec, rng::greater{}, &proc_info::gpu_percent); break;
 			}
 		}
 
@@ -158,6 +160,7 @@ bool set_priority(pid_t pid, int priority) {
 				case 5: rng::stable_sort(proc_vec, [](const auto& a, const auto& b) { return a.entry.get().mem < b.entry.get().mem; });	break;
 				case 6: rng::stable_sort(proc_vec, [](const auto& a, const auto& b) { return a.entry.get().cpu_p < b.entry.get().cpu_p; });	break;
 				case 7: rng::stable_sort(proc_vec, [](const auto& a, const auto& b) { return a.entry.get().cpu_c < b.entry.get().cpu_c; });	break;
+				case 8: rng::stable_sort(proc_vec, [](const auto& a, const auto& b) { return a.entry.get().gpu_percent < b.entry.get().gpu_percent; }); break;
 				}
 			}
 			else {
@@ -166,6 +169,7 @@ bool set_priority(pid_t pid, int priority) {
 				case 5: rng::stable_sort(proc_vec, [](const auto& a, const auto& b) { return a.entry.get().mem > b.entry.get().mem; });	break;
 				case 6: rng::stable_sort(proc_vec, [](const auto& a, const auto& b) { return a.entry.get().cpu_p > b.entry.get().cpu_p; });	break;
 				case 7: rng::stable_sort(proc_vec, [](const auto& a, const auto& b) { return a.entry.get().cpu_c > b.entry.get().cpu_c; });	break;
+				case 8: rng::stable_sort(proc_vec, [](const auto& a, const auto& b) { return a.entry.get().gpu_percent > b.entry.get().gpu_percent; }); break;
 				}
 			}
 		}
@@ -348,6 +352,9 @@ const vector<string> Proc::sort_vector = {
 	"memory",
 	"cpu direct",
 	"cpu lazy",
+#if defined(__linux__) && defined(GPU_SUPPORT)
+	"gpu",
+#endif
 };
 
 const std::unordered_map<char, string> Proc::proc_states = {

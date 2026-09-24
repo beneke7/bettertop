@@ -6,9 +6,10 @@ in a separate `bettertop-gpu` process, so a stalled driver call does not block
 host metrics or terminal controls. Apple Silicon builds use macOS GPU metrics.
 
 The default screen shows CPU, RAM, swap, disk and network activity, GPU metrics
-where available, and host processes. On Linux, GPU process memory joins host
-processes by PID. Press `v` for the original btop layout, including its CPU/GPU
-pixel graph panels; `--classic` starts there. Press `g` to switch between
+where available, and host processes. On Linux, NVIDIA GPU utilization and
+memory join host processes by PID in the classic process table. Press `v` for
+the original btop layout, including its CPU/GPU pixel graph panels; `--classic`
+starts there. Press `g` to switch between
 GPU-only and all processes,
 `x` to cycle the optional cat/rocket footer, and `q` to quit. The playful modes
 are off by default; `--fun=cat` and `--fun=rocket` enable one at startup.
@@ -29,11 +30,11 @@ On Linux, keep `bettertop-gpu` beside `bettertop`. The NVIDIA view reports
 unavailable status when its driver library is missing; PCIe and NVLink
 diagnostics are off by default.
 
-For a manual Linux x86_64 install, download the [v0.1.5 archive](https://github.com/beneke7/bettertop/releases/download/v0.1.5/bettertop-0.1.5-linux-x86_64.tar.gz),
+For a manual Linux x86_64 install, download the [v0.1.6 archive](https://github.com/beneke7/bettertop/releases/download/v0.1.6/bettertop-0.1.6-linux-x86_64.tar.gz),
 then verify and run it:
 
 ```sh
-version=0.1.5
+version=0.1.6
 archive="bettertop-${version}-linux-x86_64.tar.gz"
 curl -fsSLO "https://github.com/beneke7/bettertop/releases/download/v${version}/${archive}"
 curl -fsSLo SHA256SUMS "https://github.com/beneke7/bettertop/releases/download/v${version}/SHA256SUMS"
@@ -72,6 +73,9 @@ focused. It has not been soaked on the four-GPU Blackwell workstation.
 | `[` / `]` | Page through GPU rows |
 | `x` | Cycle off, cat and rocket footer modes |
 | `q` | Quit |
+
+In the classic process list, `←` / `→` cycle sort fields; choose `gpu` to rank
+Linux NVIDIA processes by GPU utilization.
 
 For command-line options, run `bettertop --help`. Use `--classic` to start in
 the original btop layout. On Linux, `bettertop --diagnose-gpu` runs a bounded

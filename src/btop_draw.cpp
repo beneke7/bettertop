@@ -1813,6 +1813,12 @@ namespace Proc {
 				cmd_size += 5;
 				tree_size += 5;
 			}
+#if defined(__linux__) && defined(GPU_SUPPORT)
+			if (width >= 85) {
+				cmd_size -= 6;
+				tree_size -= 6;
+			}
+#endif
 
 			//? Detailed box
 			if (show_detailed) {
@@ -1993,6 +1999,9 @@ namespace Proc {
 					+ ljust("User:", user_size) + ' '
 					+ rjust((mem_bytes ? "MemB" : "Mem%"), 5) + ' '
 					+ rjust("Cpu%", (show_graphs ? 10 : 5)) + Fx::ub;
+#if defined(__linux__) && defined(GPU_SUPPORT)
+			if (width >= 85) out += ' ' + rjust("GPU%", 5);
+#endif
 		}
 		//* End of redraw block
 
@@ -2168,6 +2177,12 @@ namespace Proc {
 				+ (is_selected or is_followed ? "" : Theme::c("inactive_fg")) + (show_graphs ? graph_bg * 5: "")
 				+ (p_graphs.contains(p.pid) ? Mv::l(5) + c_color + p_graphs.at(p.pid)({(p.cpu_p >= 0.1 and p.cpu_p < 5 ? 5ll : (long long)round(p.cpu_p))}, data_same) : "") + end + ' '
 				+ c_color + rjust(cpu_str, 4) + "  " + end;
+#if defined(__linux__) && defined(GPU_SUPPORT)
+			if (width >= 85) {
+				const string gpu_str = p.gpu_percent ? to_string(*p.gpu_percent) + '%' : "--";
+				out += c_color + rjust(gpu_str, 5) + ' ' + end;
+			}
+#endif
 			if (lc++ > height - 5) break;
 			else if (lc > height - 5 and proc_banner_shown) break;
 		}
