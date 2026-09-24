@@ -53,7 +53,7 @@ jobs:
           (cd dist && sha256sum --check SHA256SUMS)
           mkdir unpacked
           tar -xzf "dist/bettertop-${version}-linux-x86_64.tar.gz" -C unpacked
-          ./unpacked/bettertop-${version}-linux-x86_64/bin/bettertop --version
+          ./unpacked/bettertop-${version}-linux-x86_64/bin/bettertop --version | grep -F "BetterTop version: ${version}+"
           ./unpacked/bettertop-${version}-linux-x86_64/bin/bettertop-gpu --self-check
           python3 scripts/check-linux-terminal.py "unpacked/bettertop-${version}-linux-x86_64/bin/bettertop"
 

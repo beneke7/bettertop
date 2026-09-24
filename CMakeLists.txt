@@ -11,7 +11,7 @@ if("${CMAKE_CURRENT_SOURCE_DIR}" STREQUAL "${CMAKE_CURRENT_BINARY_DIR}")
 endif()
 
 project("BetterTop"
-  VERSION 0.1.4
+  VERSION 0.1.5
   DESCRIPTION "A host and GPU monitor for machine learning workstations"
   HOMEPAGE_URL "https://github.com/beneke7/bettertop"
   LANGUAGES CXX
