@@ -409,7 +409,7 @@ def main():
                          terminate_signal=sig)
             print(f"PTY signal passed: {name}, terminal restored")
 
-        startup_log = root / "startup-helper-pids"
+        startup_log = root / "startup-hang-helper-pids"
         startup_env = env_for(env, root, "startup-hang", "startup-hang")
 
         def startup_restarted(captured):
@@ -422,11 +422,13 @@ def main():
                      startup_restarted, keys_after_ready=((b"g", 0.4),))
         assert b"CPU " in output and output.count(b"CPU ") >= 3, "host display stopped during startup hang"
         assert b"Processes [all]" in output, "input did not work during startup hang"
-        assert len(helper_pids(startup_log)) <= 3, "startup hang caused a helper process storm"
+        startup_pids = helper_pids(startup_log)
+        assert len(startup_pids) >= 2, "startup hang helper was not replaced"
+        assert len(startup_pids) <= 3, "startup hang caused a helper process storm"
         assert_reaped(startup_log)
         print("Startup hang passed: host and input stayed live; blocked helper was reaped before retry")
 
-        runtime_log = root / "runtime-helper-pids"
+        runtime_log = root / "runtime-hang-helper-pids"
         runtime_env = env_for(env, root, "runtime-hang", "sample-stall")
 
         def runtime_restarted(captured):
@@ -443,7 +445,9 @@ def main():
                                        (b"n", 0.1), (b"\n", 0.5)))
         assert b"CPU " in output and output.count(b"CPU ") >= 3, "host metrics stopped during runtime hang"
         assert b"stale" in output and b"Processes [all]" in output and b"f python" in output
-        assert len(helper_pids(runtime_log)) <= 3, "runtime hang caused a helper process storm"
+        runtime_pids = helper_pids(runtime_log)
+        assert len(runtime_pids) >= 2, "runtime hang helper was not replaced"
+        assert len(runtime_pids) <= 3, "runtime hang caused a helper process storm"
         assert_reaped(runtime_log)
         print("Runtime hang passed: stale shown, host/input live, child reaped before recovery")
 
