@@ -16,6 +16,7 @@ indent = tab
 tab-size = 4
 */
 
+#include <cerrno>
 #include <limits>
 #include <ranges>
 #include <vector>
@@ -113,12 +114,25 @@ namespace Input {
 		if(pselect(STDIN_FILENO + 1, &fds, nullptr, nullptr, waitptr, &signal_mask) > 0) {
 			input.clear();
 			char buf[1024];
-			ssize_t count = 0;
-			while((count = read(STDIN_FILENO, buf, sizeof(buf))) > 0) {
-				input.append(std::string_view(buf, count));
+			while (true) {
+				const auto count = read(STDIN_FILENO, buf, sizeof(buf));
+				if (count > 0) {
+					input.append(std::string_view(buf, count));
+					continue;
+				}
+				if (count == 0) {
+					if (input.empty()) {
+						clean_quit(128 + SIGHUP);
+						return false;
+					}
+					break;
+				}
+				if (errno == EINTR or errno == EAGAIN or errno == EWOULDBLOCK) break;
+				clean_quit(128 + SIGHUP);
+				return false;
 			}
 
-			return true;
+			return not input.empty();
 		}
 
 		return false;

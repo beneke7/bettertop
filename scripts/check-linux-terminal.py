@@ -320,6 +320,31 @@ def controlled_abort(binary, env, log):
         os.close(slave)
 
 
+def terminal_disconnect(binary, env, log):
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
+    process = subprocess.Popen([str(binary), "--classic", "--update", "100"],
+                               stdin=slave, stdout=slave, stderr=slave, env=env)
+    output = bytearray()
+    try:
+        deadline = time.monotonic() + 5
+        while (b"\x1b[?1049h" not in output or not helper_pids(log)) and time.monotonic() < deadline:
+            drain(master, output, 0.1)
+        assert b"\x1b[?1049h" in output and helper_pids(log), "monitor did not initialize before disconnect"
+
+        os.close(master)
+        master = -1
+        assert process.wait(timeout=5) == 128 + signal.SIGHUP, "process did not exit after PTY disconnect"
+        assert_reaped(log)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        if master >= 0:
+            os.close(master)
+        os.close(slave)
+
+
 def env_for(base, root, name, mode=None):
     env = base.copy()
     env.update(
@@ -428,6 +453,11 @@ def main():
             output = run(binary, ["--classic"], env_for(env, root, name), 1,
                          terminate_signal=sig)
             print(f"PTY signal passed: {name}, terminal restored")
+
+        disconnect_log = root / "ssh-disconnect-helper-pids"
+        disconnect_env = env_for(env, root, "ssh-disconnect", "fixture")
+        terminal_disconnect(fake_ui, disconnect_env, disconnect_log)
+        print("SSH PTY disconnect passed: exited cleanly and reaped helper")
 
         startup_log = root / "startup-hang-helper-pids"
         startup_env = env_for(env, root, "startup-hang", "startup-hang")

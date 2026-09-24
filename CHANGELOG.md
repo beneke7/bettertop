@@ -1,3 +1,10 @@
+## BetterTop v0.1.8
+
+References | Description
+--- | ---
+#1597 | Exit cleanly when an SSH disconnect closes the terminal, instead of spinning at high CPU.
+ | Document `tmux` attach usage to keep BetterTop running across short SSH dropouts.
+
 ## BetterTop v0.1.7
 
 References | Description
