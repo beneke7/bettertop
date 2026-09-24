@@ -193,8 +193,12 @@ def run(binary, args, env, duration, predicate=None, terminate_signal=None,
         else:
             process.send_signal(terminate_signal)
             expected_code = 128 + terminate_signal
-        code = process.wait(timeout=5)
-        drain(master, output, 0.1)
+        deadline = time.monotonic() + 5
+        while process.poll() is None and time.monotonic() < deadline:
+            drain(master, output, 0.1)
+        if process.poll() is None:
+            raise subprocess.TimeoutExpired(process.args, 5)
+        code = process.returncode
         after = termios.tcgetattr(slave)
         pendin = getattr(termios, "PENDIN", 0)
         assert code == expected_code, f"{binary.name} exited with {code}, expected {expected_code}"
