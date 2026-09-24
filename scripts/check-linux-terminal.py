@@ -157,7 +157,18 @@ def helper_pids(log):
 
 def assert_reaped(log):
     pids = helper_pids(log)
-    assert all(not Path(f"/proc/{pid}").exists() for pid in pids), f"helper child survived: {pids}"
+    survivors = []
+    for pid in pids:
+        proc = Path(f"/proc/{pid}")
+        if proc.exists():
+            try:
+                state = next(line for line in (proc / "status").read_text().splitlines()
+                             if line.startswith("State:"))
+                command = (proc / "cmdline").read_bytes()
+            except (FileNotFoundError, StopIteration):
+                continue
+            survivors.append((pid, state, command))
+    assert not survivors, f"helper child survived: {survivors}"
 
 
 def run(binary, args, env, duration, predicate=None, terminate_signal=None,
