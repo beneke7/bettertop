@@ -86,6 +86,7 @@ namespace Gpu {
 	vector<int> gpu_b_height_offsets;
 	SnapshotState snapshot_state = SnapshotState::unavailable;
 	uint64_t snapshot_age_ms = 0;
+	uint64_t snapshot_sequence = 0;
 	string status_detail;
 	vector<process_info> gpu_processes;
 	std::unordered_map<string, deque<long long>> shared_gpu_percent = {

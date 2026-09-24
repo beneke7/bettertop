@@ -24,6 +24,12 @@
 using namespace Tools;
 
 namespace Ml {
+	namespace {
+		bool same_process_instance(const std::optional<uint64_t> sampled_start_ticks, const uint64_t current_start_ticks) {
+			return sampled_start_ticks.has_value() && *sampled_start_ticks == current_start_ticks;
+		}
+	}
+
 	Layout layout(const int width, const int height, const size_t gpu_count) {
 		Layout result{};
 		if (height <= 0) return result;
@@ -49,7 +55,9 @@ namespace Ml {
 			&& standard.gpu_first + standard.gpu_rows <= standard.process_header
 			&& standard.process_first + standard.process_rows <= standard.fun_row
 			&& narrow.too_small && narrow.gpu_rows == 0 && narrow.process_rows == 0
-			&& narrow.process_first <= narrow.fun_row && narrow.footer == 10;
+			&& narrow.process_first <= narrow.fun_row && narrow.footer == 10
+			&& same_process_instance(42, 42) && !same_process_instance(42, 43)
+			&& !same_process_instance(std::nullopt, 42);
 		for (int height = 1; height <= 40; ++height) {
 			const auto frame = layout(40, height, 64);
 			valid = valid && frame.gpu_rows >= 0 && frame.process_rows >= 0
@@ -339,7 +347,26 @@ namespace Ml {
 		}
 #if defined(GPU_SUPPORT)
 		std::unordered_map<size_t, const Gpu::process_info*> gpu_by_pid;
-		for (const auto& process : Gpu::gpu_processes) gpu_by_pid.insert_or_assign(process.pid, &process);
+		static uint64_t identity_sequence = std::numeric_limits<uint64_t>::max();
+		static std::unordered_map<size_t, std::optional<uint64_t>> process_start_ticks;
+		if (identity_sequence != Gpu::snapshot_sequence) {
+			process_start_ticks.clear();
+			for (const auto& process : Gpu::gpu_processes) {
+				auto host = host_by_pid.find(process.pid);
+				process_start_ticks.emplace(process.pid, host == host_by_pid.end()
+					? std::nullopt : std::optional<uint64_t>{host->second->cpu_s});
+			}
+			identity_sequence = Gpu::snapshot_sequence;
+		}
+		for (const auto& process : Gpu::gpu_processes) {
+			auto host = host_by_pid.find(process.pid);
+			if (host != host_by_pid.end()) {
+				auto sampled_start = process_start_ticks.find(process.pid);
+				if (sampled_start == process_start_ticks.end()
+					|| !same_process_instance(sampled_start->second, host->second->cpu_s)) continue;
+			}
+			gpu_by_pid.insert_or_assign(process.pid, &process);
+		}
 #endif
 		for (const auto& process : processes) {
 #if defined(GPU_SUPPORT)

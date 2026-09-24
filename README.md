@@ -28,6 +28,19 @@ On Linux, keep `bettertop-gpu` beside `bettertop`. The NVIDIA view reports
 unavailable status when its driver library is missing; PCIe and NVLink
 diagnostics are off by default.
 
+For a manual Linux x86_64 install, download the [v0.1.3 archive](https://github.com/beneke7/bettertop/releases/download/v0.1.3/bettertop-0.1.3-linux-x86_64.tar.gz),
+then verify and run it:
+
+```sh
+version=0.1.3
+archive="bettertop-${version}-linux-x86_64.tar.gz"
+curl -fsSLO "https://github.com/beneke7/bettertop/releases/download/v${version}/${archive}"
+curl -fsSLo SHA256SUMS "https://github.com/beneke7/bettertop/releases/download/v${version}/SHA256SUMS"
+grep "$archive" SHA256SUMS | sha256sum --check
+tar -xzf "$archive"
+"./bettertop-${version}-linux-x86_64/bin/bettertop"
+```
+
 Each release archive includes themes, notices and licenses, with its checksum
 listed in `SHA256SUMS`. GitHub also provides source archives for tagged releases.
 

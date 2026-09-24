@@ -1851,6 +1851,7 @@ namespace Gpu {
 			: snapshot.state == Bridge::State::starting ? SnapshotState::starting
 			: SnapshotState::unavailable;
 		snapshot_age_ms = snapshot.age_ms;
+		snapshot_sequence = snapshot.has_sample ? snapshot.sequence : 0;
 		status_detail = snapshot.state == Bridge::State::disabled ? "NVIDIA disabled in shown_gpus"
 			: snapshot.state == Bridge::State::starting ? "NVIDIA helper starting"
 			: snapshot.state == Bridge::State::healthy ? "NVIDIA helper connected"

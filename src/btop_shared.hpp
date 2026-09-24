@@ -114,6 +114,7 @@ namespace Gpu {
 	enum class SnapshotState { starting, healthy, stale, unavailable, disabled };
 	extern SnapshotState snapshot_state;
 	extern uint64_t snapshot_age_ms;
+	extern uint64_t snapshot_sequence;
 	extern string status_detail;
 
 	extern vector<string> box;
