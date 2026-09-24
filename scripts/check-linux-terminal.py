@@ -440,10 +440,14 @@ def main():
         recovery_env = env_for(env, root, "recovery", "recover")
 
         def recovered(captured):
-            return b"stale" in captured and len(helper_pids(recovery_log)) >= 2 and fixture_visible(captured)
+            rows = screen_rows(captured)
+            return b"stale" in captured and len(helper_pids(recovery_log)) >= 2 \
+                and fixture_visible(captured) and "healthy" in rows.get(30, "")
 
         output = run(fake_ui, ["--update", "100", "--fun=cat"], recovery_env, 10, recovered)
-        assert b"stale" in output and "healthy" in screen_rows(output).get(30, "")
+        rows = screen_rows(output)
+        assert b"stale" in output and "healthy" in rows.get(30, ""), \
+            f"fresh GPU sample did not clear stale state: footer={rows.get(30)!r}"
         assert len(helper_pids(recovery_log)) <= 3, "recovery caused a helper process storm"
         assert_reaped(recovery_log)
         print("Recovery passed: a fresh four-GPU sample cleared stale state")
