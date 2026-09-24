@@ -337,12 +337,10 @@ def fixture_visible(output):
         and "424242" in rows.get(13, "") and "120G" in rows.get(29, "")
 
 def classic_graphs_visible(output):
-    text = output.decode("utf-8", "replace")
-    rows = screen_rows(output)
+    text = CSI.sub(b"", output).decode("utf-8", "replace")
     pixels = any(0x2801 <= ord(char) <= 0x28ff for char in text)
-    return pixels and any("CPU" in row for row in rows.values()) \
-        and any("GPU" in row for row in rows.values()) \
-        and "NVIDIA Blackwell" in text
+    return pixels and "CPU" in text \
+        and all(f"GPU{index}" in text for index in range(4))
 
 
 def main():
