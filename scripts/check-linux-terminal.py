@@ -31,6 +31,7 @@ from pathlib import Path
 
 mode = os.environ["BETTERTOP_HELPER_MODE"]
 log_path = Path(os.environ["BETTERTOP_HELPER_LOG"])
+events_path = Path(str(log_path) + ".events")
 try:
     invocation = len(log_path.read_text().splitlines()) + 1
 except FileNotFoundError:
@@ -38,6 +39,8 @@ except FileNotFoundError:
 with log_path.open("a") as log:
     log.write(str(os.getpid()) + "\n")
     log.flush()
+with events_path.open("a") as log:
+    log.write(f"start pid={os.getpid()} invocation={invocation} mode={mode}\n")
 signal.signal(signal.SIGTERM, signal.SIG_IGN)
 fd = os.open("/dev/null", os.O_RDONLY)
 os.dup2(fd, 0)
@@ -114,18 +117,24 @@ elif mode == "fast":
         payload = payload[os.write(1, payload):]
     hold()
 elif mode == "fixture":
+    with events_path.open("a") as log:
+        log.write("streaming fixture\n")
     sequence = 1
     while True:
         write_partial(fixture(sequence))
         sequence += 1
         time.sleep(0.35)
 elif mode == "recover" and invocation > 1:
+    with events_path.open("a") as log:
+        log.write("streaming recovered fixture\n")
     sequence = 1
     while True:
         write_partial(fixture(sequence))
         sequence += 1
         time.sleep(0.35)
 else:
+    with events_path.open("a") as log:
+        log.write("single frame then hold\n")
     write_partial(frame(1))
     hold()
 '''
@@ -447,9 +456,11 @@ def main():
         output = run(fake_ui, ["--update", "100", "--fun=cat"], recovery_env, 10, recovered)
         rows = screen_rows(output)
         pids = helper_pids(recovery_log)
+        events_path = Path(str(recovery_log) + ".events")
+        events = events_path.read_text() if events_path.exists() else "<no helper events>"
         assert b"stale" in output and "healthy" in rows.get(30, ""), \
             f"fresh GPU sample did not clear stale state: footer={rows.get(30)!r}, helpers={pids}, " \
-            f"fixture_visible={fixture_visible(output)}"
+            f"fixture_visible={fixture_visible(output)}, events={events!r}"
         assert len(pids) <= 3, "recovery caused a helper process storm"
         assert_reaped(recovery_log)
         print("Recovery passed: a fresh four-GPU sample cleared stale state")
