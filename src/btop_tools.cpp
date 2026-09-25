@@ -86,6 +86,7 @@ namespace Term {
 		}
 
 		void write_all(const int fd, const char* data, size_t size) noexcept {
+			const auto write_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds{100};
 			while (size > 0) {
 				const auto written = ::write(fd, data, size);
 				if (written > 0) {
@@ -93,6 +94,16 @@ namespace Term {
 					size -= static_cast<size_t>(written);
 				}
 				else if (written < 0 and errno == EINTR) continue;
+				else if (written < 0 and (errno == EAGAIN or errno == EWOULDBLOCK)) {
+					const auto remaining_time = write_deadline - std::chrono::steady_clock::now();
+					if (remaining_time <= std::chrono::steady_clock::duration::zero()) break;
+					const auto wait_ms = std::max<int64_t>(1, std::chrono::duration_cast<std::chrono::milliseconds>(remaining_time).count());
+					struct pollfd writable{fd, POLLOUT, 0};
+					int ready;
+					do { ready = poll(&writable, 1, static_cast<int>(wait_ms)); }
+					while (ready < 0 and errno == EINTR and std::chrono::steady_clock::now() < write_deadline);
+					if (ready <= 0 or (writable.revents & POLLOUT) == 0) break;
+				}
 				else break;
 			}
 		}
