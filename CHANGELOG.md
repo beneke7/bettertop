@@ -1,3 +1,10 @@
+## BetterTop v0.1.12-debug (pre-release)
+
+References | Description
+--- | ---
+ | Allow a brief bounded PTY drain before dropping a stale frame, reducing screen refresh stutter over SSH.
+ | Keep debug symbols with release-level optimization.
+
 ## BetterTop v0.1.11-debug (pre-release)
 
 References | Description

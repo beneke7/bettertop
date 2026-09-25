@@ -227,6 +227,8 @@ namespace Term {
 			return;
 		}
 
+		// ponytail: Cap PTY drain waits at 20 ms; use an async writer only if normal frames still get dropped.
+		const auto write_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds{20};
 		const char* data = text.data();
 		for (size_t remaining = text.size(); remaining > 0;) {
 			const auto written = ::write(nonblocking_output_fd, data, remaining);
@@ -235,9 +237,24 @@ namespace Term {
 				remaining -= static_cast<size_t>(written);
 			}
 			else if (written < 0 and errno == EINTR) continue;
+			else if (written < 0 and (errno == EAGAIN or errno == EWOULDBLOCK)) {
+				const auto remaining_time = write_deadline - std::chrono::steady_clock::now();
+				if (remaining_time <= std::chrono::steady_clock::duration::zero()) {
+					output_blocked = true;
+					return;
+				}
+				const auto wait_ms = std::max<int64_t>(1, std::chrono::duration_cast<std::chrono::milliseconds>(remaining_time).count());
+				struct pollfd fd{nonblocking_output_fd, POLLOUT, 0};
+				int ready;
+				do { ready = poll(&fd, 1, static_cast<int>(wait_ms)); }
+				while (ready < 0 and errno == EINTR and std::chrono::steady_clock::now() < write_deadline);
+				if (ready <= 0 or (fd.revents & POLLOUT) == 0) {
+					output_blocked = true;
+					return;
+				}
+			}
 			else {
 				output_blocked = true;
-				Global::resized = true;
 				return;
 			}
 		}

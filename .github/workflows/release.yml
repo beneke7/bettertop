@@ -27,13 +27,19 @@ jobs:
       - name: Configure
         run: |
           build_type=Release
-          if [[ "$GITHUB_REF_NAME" == *-debug ]]; then build_type=RelWithDebInfo; fi
+          debug_flags=()
+          if [[ "$GITHUB_REF_NAME" == *-debug ]]; then
+            build_type=RelWithDebInfo
+            debug_flags+=("-DCMAKE_C_FLAGS_RELWITHDEBINFO=-O3 -g -DNDEBUG")
+            debug_flags+=("-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-O3 -g -DNDEBUG")
+          fi
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE="$build_type" \
             -DCMAKE_C_COMPILER=gcc-14 \
             -DCMAKE_CXX_COMPILER=g++-14 \
             -DBTOP_GPU=ON \
-            -DBUILD_TESTING=ON
+            -DBUILD_TESTING=ON \
+            "${debug_flags[@]}"
 
       - name: Build and check
         run: |
@@ -96,12 +102,18 @@ jobs:
       - name: Configure and build
         run: |
           build_type=Release
-          if [[ "$GITHUB_REF_NAME" == *-debug ]]; then build_type=RelWithDebInfo; fi
+          debug_flags=()
+          if [[ "$GITHUB_REF_NAME" == *-debug ]]; then
+            build_type=RelWithDebInfo
+            debug_flags+=("-DCMAKE_C_FLAGS_RELWITHDEBINFO=-O3 -g -DNDEBUG")
+            debug_flags+=("-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-O3 -g -DNDEBUG")
+          fi
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE="$build_type" \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
             -DBTOP_GPU=${{ matrix.gpu }} \
-            -DBUILD_TESTING=OFF
+            -DBUILD_TESTING=OFF \
+            "${debug_flags[@]}"
           cmake --build build --parallel
           ./build/bettertop --version
           ./build/bettertop --check-ml-layout
